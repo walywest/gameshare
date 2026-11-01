@@ -2,6 +2,7 @@
 
 let
   port = 8080;
+
 in
 {
   packages = [
@@ -10,12 +11,6 @@ in
       version = "1";
       src = ./server;
       vendorHash = null;
-    })
-    (pkgs.buildGoModule {
-      pname = "gs";
-      version = "1";
-      src = ./client;
-      vendorHash = "sha256-rp0wYd9JLN3KL3W++Sjcebsbbo7Ru8OsTi70nbiO6AI=";
     })
   ];
 
@@ -30,6 +25,15 @@ in
     exec game-share "$SERVE_PORT" "$dir"
   '';
 
+  # Built on first use, so a machine that only serves never compiles the client.
+  # go build is a no-op until client/ changes.
+  scripts.gs.exec = ''
+    bin=$DEVENV_STATE/gs
+    [[ -x $bin ]] || echo "Building gs, first run only..." >&2
+    CGO_ENABLED=0 GOTOOLCHAIN=local ${pkgs.go}/bin/go build -C "$DEVENV_ROOT/client" -o "$bin" . || exit 1
+    exec "$bin" "$@"
+  '';
+
   scripts.lan-ip.exec = ''
     ip -4 -o addr show scope global | awk '{print $2": http://"substr($4,1,index($4,"/")-1)":'"$SERVE_PORT"'"}'
   '';
@@ -38,7 +42,7 @@ in
 
   enterShell = ''
     echo "serve    share a folder on :$SERVE_PORT (serve <folder>)"
-    echo "gs       terminal client (gs http://<server>:$SERVE_PORT)"
+    echo "gs       terminal client, built on first use (gs http://<server>:$SERVE_PORT)"
     echo "lan-ip   print this machine's URLs"
   '';
 }

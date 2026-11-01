@@ -20,6 +20,8 @@ devenv shell
 gs http://192.168.1.11:8080
 ```
 
+`gs` compiles the first time you run it, so the laptop never builds it unless you run it there. It rebuilds by itself when `client/` changes.
+
 `gs` remembers the server, so after the first run plain `gs` is enough. Downloads go to `~/Downloads/GameShare`; use `-d <folder>` to change that.
 
 ## Speed check
@@ -98,10 +100,8 @@ Plain HTTP and no auth, on purpose. Anyone who can reach the port can read and u
 
 ## Changing the code
 
-devenv can miss edits in `server/` and `client/` and keep running the old build. After changing them, enter the shell with:
+devenv can miss edits in `server/` and keep running the old build. After changing it, enter the shell with:
 
 ```sh
 devenv shell --refresh-eval-cache
 ```
-
-If `client/go.mod` changes, update `vendorHash` in `devenv.nix`. The build error prints the new value.
