@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
 	"os"
@@ -25,6 +26,8 @@ func main() {
 	get := flag.String("get", "", "without the UI: download this remote file or folder")
 	put := flag.String("put", "", "without the UI: upload this local file or folder")
 	into := flag.String("into", "", "remote folder for -put")
+	checkOnly := flag.Bool("check", false, "run the speed check and exit, with status 1 on any alert")
+	noCheck := flag.Bool("no-check", false, "skip the speed check before starting")
 	flag.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: gs [flags] [http://server:8080]\nThe server and queue are remembered between runs.")
 		flag.PrintDefaults()
@@ -45,9 +48,25 @@ func main() {
 
 	e := NewEngine(strings.TrimRight(server, "/"), *dest, *stateFile)
 	e.Restore()
+	e.Save() // remember the server even if this run stops at the speed check
 
+	if *checkOnly {
+		r, ok := e.SpeedCheck()
+		if !ok || Verdict(r) {
+			os.Exit(1)
+		}
+		return
+	}
 	if *get != "" || *put != "" {
 		os.Exit(headless(e, *get, *put, *into))
+	}
+
+	// Runs before Kick so restored transfers don't skew the measurements.
+	if !*noCheck {
+		if r, ok := e.SpeedCheck(); ok && Verdict(r) {
+			fmt.Print("\n  Press Enter to continue anyway, or Ctrl-C to fix this first. ")
+			bufio.NewReader(os.Stdin).ReadString('\n')
+		}
 	}
 
 	e.Kick()

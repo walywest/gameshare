@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -132,6 +133,12 @@ func (e *Engine) Restore() {
 		}
 		e.items = append(e.items, it)
 	}
+}
+
+func (e *Engine) Save() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.saveLocked()
 }
 
 // saveLocked writes through a temp file so a crash can't leave a torn queue.
@@ -628,7 +635,8 @@ func (e *Engine) upload(parent context.Context, it *Item) error {
 	var body io.Reader = http.NoBody
 	if remaining > 0 {
 		section := io.NewSectionReader(f, status.Offset, remaining)
-		body = tickReader{countReader{section, &it.sent}, tick}
+		// Large reads matter on /mnt: WSL's 9p bridge is far slower with small ones.
+		body = tickReader{countReader{bufio.NewReaderSize(section, copyBuffer), &it.sent}, tick}
 	}
 	put, err := http.NewRequestWithContext(ctx, http.MethodPut, e.url("/api/upload", q), io.NopCloser(body))
 	if err != nil {

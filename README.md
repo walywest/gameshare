@@ -22,6 +22,25 @@ gs http://192.168.1.11:8080
 
 `gs` remembers the server, so after the first run plain `gs` is enough. Downloads go to `~/Downloads/GameShare`; use `-d <folder>` to change that.
 
+## Speed check
+
+Speed is the point of this tool, so both ends test themselves before they start.
+
+**`serve`** takes about 2 seconds and checks what the laptop can see alone: the speed of the shared folder's disk, whether Ethernet is up and what speed it negotiated, and free space. It prints alerts but always starts, because a server may have nobody watching it. It can't measure real throughput, which takes both ends.
+
+**`gs`** then times every stage, in about 10 seconds:
+
+| Direction | Stages, in order                              |
+| --------- | --------------------------------------------- |
+| Download  | Server disk read, network, local disk write   |
+| Upload    | Local disk read, network, server disk write   |
+
+A transfer is only as fast as its slowest stage, so `gs` prints that stage for each direction. The network tests use memory, not disk, so they measure the link alone. Disk tests write a temporary file, flush it, and read it back with the page cache dropped.
+
+An **ALERT** means something is holding transfers back, and `gs` waits for Enter before continuing: a network under 100 MB/s, or a disk slower than the network. A **note** is worth knowing but doesn't stop anything: high latency, a disk with little headroom, or a download folder on `/mnt`.
+
+If the server can't be reached, the check is skipped and `gs` starts anyway, so queued transfers can still resume. Use `gs -no-check` to skip it, or `gs -check` to run only the check. `-get` and `-put` don't run it.
+
 ## Keys
 
 | Pane  | Key            | Action                                     |
@@ -67,9 +86,9 @@ Gigabit Ethernet tops out around 117 MB/s, and the network has to stay the slowe
 | Download to WSL disk  | 285 MB/s  |
 | Download to `/mnt/c`  | 165 MB/s  |
 | Upload from WSL disk  | 523 MB/s  |
-| Upload from `/mnt/c`  | 121 MB/s  |
+| Upload from `/mnt/c`  | 199 MB/s  |
 
-`/mnt/c` goes through WSL's slower 9p bridge, and uploading from it is only just faster than gigabit. It would be the bottleneck on any faster link. The WSL disk is the default for that reason.
+`/mnt/c` goes through WSL's slower 9p bridge. It clears gigabit but would be the bottleneck on a faster link, so the WSL disk is the default. The speed check's `/mnt/c` read can read a little high, because Windows may have cached its test file.
 
 A rate stuck near 12 MB/s means the link is running at 100 Mbps. Check the cable and the adapter's Speed & Duplex setting, which should be Auto Negotiation.
 

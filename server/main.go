@@ -5,6 +5,7 @@
 package main
 
 import (
+	crand "crypto/rand"
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
@@ -310,6 +311,85 @@ func handleDownload(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, info.Name(), info.ModTime(), f)
 }
 
+// handleSpeedDown streams memory for a set time, so it measures only the network.
+func handleSpeedDown(w http.ResponseWriter, r *http.Request) {
+	ms, err := strconv.Atoi(r.URL.Query().Get("ms"))
+	if err != nil || ms < 1 || ms > 10000 {
+		http.Error(w, "bad ms", http.StatusBadRequest)
+		return
+	}
+	buf := make([]byte, copyBuffer)
+	crand.Read(buf)
+	for end := time.Now().Add(time.Duration(ms) * time.Millisecond); time.Now().Before(end); {
+		if _, err := w.Write(buf); err != nil {
+			return
+		}
+	}
+}
+
+func handleSpeedUp(w http.ResponseWriter, r *http.Request) {
+	io.CopyBuffer(struct{ io.Writer }{io.Discard}, struct{ io.Reader }{r.Body}, make([]byte, copyBuffer))
+}
+
+// handleSpeedDisk times a flushed write and a read with the page cache dropped, in
+// the partial-upload folder so it tests the disk files really land on.
+func handleSpeedDisk(w http.ResponseWriter, r *http.Request) {
+	read, write, err := diskSpeed()
+	if err != nil {
+		writeJSON(w, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, map[string]any{"read": read, "write": write})
+}
+
+func diskSpeed() (read, write float64, err error) {
+	const limit, window, mb = 1 << 30, time.Second, 1 << 20
+	if freeBytes() < 2*limit {
+		return 0, 0, errors.New("less than 2 GB free")
+	}
+	f, err := os.CreateTemp(partDir, "speed-*")
+	if err != nil {
+		return 0, 0, err
+	}
+	defer os.Remove(f.Name())
+	defer f.Close()
+
+	buf := make([]byte, copyBuffer)
+	crand.Read(buf)
+	start := time.Now()
+	var written int64
+	for written < limit && time.Since(start) < window {
+		n, err := f.Write(buf)
+		if err != nil {
+			return 0, 0, err
+		}
+		written += int64(n)
+	}
+	if err := f.Sync(); err != nil {
+		return 0, 0, err
+	}
+	write = float64(written) / mb / time.Since(start).Seconds()
+
+	const dontNeed = 4
+	syscall.Syscall6(syscall.SYS_FADVISE64, f.Fd(), 0, 0, dontNeed, 0, 0)
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return 0, 0, err
+	}
+	start = time.Now()
+	var total int64
+	for time.Since(start) < window {
+		n, err := f.Read(buf)
+		total += int64(n)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return 0, 0, err
+		}
+	}
+	return float64(total) / mb / time.Since(start).Seconds(), write, nil
+}
+
 func main() {
 	if len(os.Args) != 3 {
 		log.Fatalf("usage: %s <port> <folder>", os.Args[0])
@@ -326,11 +406,17 @@ func main() {
 		log.Fatal(err)
 	}
 
+	preflight()
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/list", handleList)
 	mux.HandleFunc("/api/tree", handleTree)
 	mux.HandleFunc("/api/upload", handleUpload)
 	mux.HandleFunc("/dl", handleDownload)
+	mux.HandleFunc("/api/speed/ping", func(http.ResponseWriter, *http.Request) {})
+	mux.HandleFunc("/api/speed/down", handleSpeedDown)
+	mux.HandleFunc("/api/speed/up", handleSpeedUp)
+	mux.HandleFunc("/api/speed/disk", handleSpeedDisk)
 
 	log.Printf("serving %s on :%s", root, os.Args[1])
 	log.Fatal(http.ListenAndServe(":"+os.Args[1], mux))
