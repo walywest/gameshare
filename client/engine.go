@@ -804,3 +804,66 @@ func (e *Engine) Delete(remote string) error {
 	e.scheduleLocked()
 	return nil
 }
+
+// UpdateResult is the server's reply to an update request.
+type UpdateResult struct {
+	From       string `json:"from"`
+	To         string `json:"to"`
+	Log        string `json:"log"`
+	ServerCode bool   `json:"serverCode"`
+	BuildErr   string `json:"buildErr"`
+	Restarting bool   `json:"restarting"`
+}
+
+// UpdateServer asks a server in CD mode to pull its code from GitHub and restart if
+// that changed it. Running transfers reconnect after the restart by themselves.
+func (e *Engine) UpdateServer() (UpdateResult, error) {
+	var res UpdateResult
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, e.url("/api/update", nil), nil)
+	if err != nil {
+		return res, err
+	}
+	// Not e.client: pulling and building can outlast its header timeout.
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return res, errors.New(shortErr(err))
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return res, errors.New("the server isn't in CD mode; start it with serve --cd")
+	}
+	if resp.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 2000))
+		if len(bytes.TrimSpace(msg)) == 0 {
+			return res, errors.New(resp.Status)
+		}
+		return res, errors.New(string(bytes.TrimSpace(msg)))
+	}
+	return res, json.NewDecoder(resp.Body).Decode(&res)
+}
+
+// Summary says in one line what an update did.
+func (r UpdateResult) Summary() (string, bool) {
+	commits := 0
+	if r.Log != "" {
+		commits = len(strings.Split(r.Log, "\n"))
+	}
+	pulled := fmt.Sprintf("Pulled %s → %s (%d new commit", r.From, r.To, commits)
+	if commits != 1 {
+		pulled += "s"
+	}
+	pulled += ")"
+	switch {
+	case r.From == r.To:
+		return "Server already up to date at " + r.To, false
+	case r.BuildErr != "":
+		first, _, _ := strings.Cut(r.BuildErr, "\n")
+		return pulled + ", but it doesn't build, so the old server keeps running: " + first, true
+	case r.Restarting:
+		return pulled + ". Server restarting; transfers resume by themselves", false
+	default:
+		return pulled + ". No server code changed, so no restart", false
+	}
+}

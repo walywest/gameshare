@@ -55,6 +55,7 @@ Press `?` in `gs` for this list. The footer always shows the keys for the pane y
 | Both  | `home` `end` / `g` `G`  | Jump to the top or bottom                  |
 | Both  | `u`                     | Type or drop paths to upload               |
 | Both  | `c`                     | Clear finished items                       |
+| Both  | `U`                     | Update the server from GitHub, after a `y` to confirm. Needs CD mode |
 | Both  | `?`                     | Show all keys                              |
 | Both  | `q`                     | Quit. The queue resumes on the next run    |
 | Files | `enter` `→` `l`         | Open a folder                              |
@@ -74,6 +75,18 @@ In the file list, `↓` and `↑` mark files and folders with transfers still to
 To upload, drag files or folders from Explorer onto the terminal. They go to the folder open in the Files pane. If a drop doesn't register, press `u` first, then drop and press Enter. `C:\...` paths are converted to `/mnt/c/...`.
 
 Without the UI: `gs -get game/folder` and `gs -put /path -into game`.
+
+## CD mode
+
+Start the server with `serve --cd [folder]` and `gs` can update it: press `U`, then `y`. The server runs `git pull --ff-only` in its repo. If anything under `server/` changed and still builds, it restarts on the new code. Transfers reconnect by themselves. `gs` shows what happened: already up to date, pulled with no server change, restarting, or pulled but doesn't build. A broken build leaves the old server running.
+
+The pull authenticates with `GIT_PASS` from `.env` at the repo root on the server, read on every update. For GitHub, use a personal access token with read access to the repo. `GIT_USER` is optional. `.env` is gitignored.
+
+```sh
+GIT_PASS=github_pat_...
+```
+
+In CD mode, `serve` builds the server from `server/` with Go instead of using the devenv package, then rebuilds it after each update. It doesn't reload itself, so after a pull that changes `devenv.nix`, restart `serve` by hand. A pull fails rather than merging if the server's checkout has local commits or edits that clash.
 
 ## Resuming
 
@@ -108,7 +121,7 @@ A rate stuck near 12 MB/s means the link is running at 100 Mbps. Check the cable
 
 ## Security
 
-Plain HTTP and no auth, on purpose. Anyone who can reach the port can read, upload and delete files, so open it only to networks you trust. Requests can't leave the shared folder and dotfiles aren't served. Deleting refuses the shared folder itself and anything an upload is still writing into.
+Plain HTTP and no auth, on purpose. Anyone who can reach the port can read, upload and delete files, so open it only to networks you trust. Requests can't leave the shared folder and dotfiles aren't served. Deleting refuses the shared folder itself and anything an upload is still writing into. In CD mode, anyone who can reach the port can also make the server pull and restart. They can only pull what's already on GitHub.
 
 ## Changing the code
 

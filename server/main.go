@@ -422,6 +422,12 @@ func diskSpeed() (read, write float64, err error) {
 }
 
 func main() {
+	if os.Getenv("GAMESHARE_ASKPASS") == "1" { // git asking for credentials, see update.go
+		if len(os.Args) > 1 {
+			fmt.Println(askpass(os.Args[1]))
+		}
+		return
+	}
 	if len(os.Args) != 3 {
 		log.Fatalf("usage: %s <port> <folder>", os.Args[0])
 	}
@@ -449,6 +455,13 @@ func main() {
 	mux.HandleFunc("/api/speed/down", handleSpeedDown)
 	mux.HandleFunc("/api/speed/up", handleSpeedUp)
 	mux.HandleFunc("/api/speed/disk", handleSpeedDisk)
+	if cdRepo = os.Getenv("GAMESHARE_CD"); cdRepo != "" {
+		if g := os.Getenv("GAMESHARE_GO"); g != "" {
+			goBin = g
+		}
+		mux.HandleFunc("/api/update", handleUpdate)
+		log.Printf("CD mode: gs can update this server from %s", cdRepo)
+	}
 
 	log.Printf("serving %s on :%s", root, os.Args[1])
 	log.Fatal(http.ListenAndServe(":"+os.Args[1], mux))

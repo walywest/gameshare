@@ -157,3 +157,22 @@ func TestBackSelectsFolderWeLeft(t *testing.T) {
 		t.Fatal("stale listing applied")
 	}
 }
+
+func TestUpdateSummary(t *testing.T) {
+	cases := []struct {
+		r    UpdateResult
+		want string
+		err  bool
+	}{
+		{UpdateResult{From: "a", To: "a"}, "already up to date", false},
+		{UpdateResult{From: "a", To: "b", Log: "b one"}, "1 new commit)", false},
+		{UpdateResult{From: "a", To: "b", Log: "b one\nc two", ServerCode: true, Restarting: true}, "Server restarting", false},
+		{UpdateResult{From: "a", To: "b", Log: "b", ServerCode: true, BuildErr: "x.go:1: bad\nmore"}, "old server keeps running: x.go:1: bad", true},
+	}
+	for _, c := range cases {
+		got, isErr := c.r.Summary()
+		if !strings.Contains(got, c.want) || isErr != c.err || strings.Contains(got, "more") {
+			t.Errorf("%+v: %q %v", c.r, got, isErr)
+		}
+	}
+}

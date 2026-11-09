@@ -31,6 +31,11 @@ type deletedMsg struct {
 	err    error
 }
 
+type updatedMsg struct {
+	res UpdateResult
+	err error
+}
+
 type promptKind int
 
 const (
@@ -38,6 +43,7 @@ const (
 	promptUpload
 	promptFilter
 	promptDelete
+	promptUpdate
 )
 
 const (
@@ -130,6 +136,14 @@ func (m model) download(remote string) tea.Cmd {
 func (m model) remove(remote string) tea.Cmd {
 	e := m.e
 	return func() tea.Msg { return deletedMsg{remote, e.Delete(remote)} }
+}
+
+func (m model) updateServer() tea.Cmd {
+	e := m.e
+	return func() tea.Msg {
+		res, err := e.UpdateServer()
+		return updatedMsg{res, err}
+	}
 }
 
 func plural(n int, word string) string {
@@ -228,6 +242,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.setNote("Deleted /"+msg.remote+" from the server", false)
 		return m, m.loadDir(m.cwd)
+	case updatedMsg:
+		if msg.err != nil {
+			m.setNote("Couldn't update the server: "+msg.err.Error(), true)
+			return m, nil
+		}
+		m.setNote(msg.res.Summary())
+		return m, nil
 	case tea.KeyMsg:
 		return m.key(msg)
 	}
@@ -370,6 +391,8 @@ func (m model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.move(m.count(m.pane))
 	case "u":
 		m.prompt, m.input = promptUpload, ""
+	case "U":
+		m.prompt = promptUpdate
 	case "c":
 		m.e.ClearDone()
 		m.views = m.e.Snapshot()
@@ -384,6 +407,16 @@ func (m model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) promptKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.prompt == promptUpdate {
+		m.prompt = noPrompt
+		if k.String() == "y" || k.String() == "Y" {
+			m.setNote("Updating the server from GitHub…", false)
+			m.noteAt = time.Now().Add(6 * time.Minute) // stays up until the reply
+			return m, m.updateServer()
+		}
+		m.setNote("Update cancelled", false)
+		return m, nil
+	}
 	if m.prompt == promptDelete {
 		target := m.target
 		m.prompt, m.target = noPrompt, ""
@@ -859,6 +892,9 @@ func (m model) statusLine() string {
 		return " " + sKey.Render("Upload into /"+m.cwd+":") + " " + m.input + "▌" + sDim.Render("  (type or drop paths, enter to queue, esc to cancel)")
 	case promptFilter:
 		return " " + sKey.Render("Filter:") + " " + m.input + "▌" + sDim.Render("  (enter keeps it, esc clears)")
+	case promptUpdate:
+		return " " + sKey.Bold(true).Render("Update the server from GitHub?") + " It pulls, and restarts if its code changed. " +
+			sKey.Render("y") + sDim.Render(" update  ") + sKey.Render("any other key") + sDim.Render(" cancel")
 	case promptDelete:
 		what := "/" + m.target
 		for _, e := range m.entries {
@@ -887,6 +923,7 @@ func (m model) helpView(w, h int) string {
 		{"home end", "jump to the top or bottom (also g, G)"},
 		{"u", "type or drop paths to upload into the open folder"},
 		{"c", "clear finished items from the queue"},
+		{"U", "update the server from GitHub (CD mode, asks first)"},
 		{"q", "quit; the queue resumes on the next run"},
 		{"", ""},
 		{"", "Files"},
