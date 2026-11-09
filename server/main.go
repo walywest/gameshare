@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	crand "crypto/rand"
 	"crypto/sha1"
 	"encoding/hex"
@@ -455,11 +456,15 @@ func main() {
 	mux.HandleFunc("/api/speed/down", handleSpeedDown)
 	mux.HandleFunc("/api/speed/up", handleSpeedUp)
 	mux.HandleFunc("/api/speed/disk", handleSpeedDisk)
+	mux.HandleFunc("/api/version", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, map[string]any{"commit": runningCommit, "cd": cdRepo != ""})
+	})
 	if cdRepo = os.Getenv("GAMESHARE_CD"); cdRepo != "" {
 		if g := os.Getenv("GAMESHARE_GO"); g != "" {
 			goBin = g
 		}
 		mux.HandleFunc("/api/update", handleUpdate)
+		runningCommit, _ = git(context.Background(), nil, "rev-parse", "--short", "HEAD")
 		log.Printf("CD mode: gs can update this server from %s", cdRepo)
 	}
 

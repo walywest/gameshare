@@ -26,9 +26,10 @@ import (
 const restartCode = 75 // the serve loop restarts on this exit status, and stops on any other
 
 var (
-	cdRepo   string // repo root, set only in CD mode
-	goBin    = "go"
-	updating sync.Mutex
+	cdRepo        string // repo root, set only in CD mode
+	runningCommit string // commit the running server was built from, in CD mode
+	goBin         = "go"
+	updating      sync.Mutex
 )
 
 type updateResult struct {
