@@ -37,6 +37,8 @@ var (
 	root    string
 	partDir string
 
+	started = time.Now()
+
 	uploadsMu sync.Mutex
 	uploads   = map[string]string{} // part file -> target, for each PUT in progress
 )
@@ -457,7 +459,7 @@ func main() {
 	mux.HandleFunc("/api/speed/up", handleSpeedUp)
 	mux.HandleFunc("/api/speed/disk", handleSpeedDisk)
 	mux.HandleFunc("/api/version", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, map[string]any{"commit": runningCommit, "cd": cdRepo != ""})
+		writeJSON(w, map[string]any{"commit": runningCommit, "cd": cdRepo != "", "started": started.Format(time.RFC3339)})
 	})
 	if cdRepo = os.Getenv("GAMESHARE_CD"); cdRepo != "" {
 		if g := os.Getenv("GAMESHARE_GO"); g != "" {
