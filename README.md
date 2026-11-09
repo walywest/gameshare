@@ -45,19 +45,31 @@ If the server can't be reached, the check is skipped and `gs` starts anyway, so 
 
 ## Keys
 
-| Pane  | Key            | Action                                     |
-| ----- | -------------- | ------------------------------------------ |
-| Both  | `tab`          | Switch between files and queue             |
-| Both  | `u`            | Type or drop paths to upload               |
-| Both  | `q`            | Quit. The queue resumes on the next run    |
-| Files | `enter` / `←`  | Open a folder / go back                    |
-| Files | `d`            | Download the selected file or folder       |
-| Files | `a`            | Download everything in this folder         |
-| Files | `r`            | Refresh                                    |
-| Queue | `space`        | Pause or resume                            |
-| Queue | `n`            | Run this item next                         |
-| Queue | `x`            | Remove from the queue. Its partial file stays, so adding it again resumes |
-| Queue | `c`            | Clear finished items                       |
+Press `?` in `gs` for this list. The footer always shows the keys for the pane you're in.
+
+| Pane  | Key                     | Action                                     |
+| ----- | ----------------------- | ------------------------------------------ |
+| Both  | `tab`                   | Switch between files and queue             |
+| Both  | `↑` `↓` / `k` `j`       | Move                                       |
+| Both  | `pgup` `pgdn`           | Move a page (also `ctrl+u`, `ctrl+d`)      |
+| Both  | `home` `end` / `g` `G`  | Jump to the top or bottom                  |
+| Both  | `u`                     | Type or drop paths to upload               |
+| Both  | `c`                     | Clear finished items                       |
+| Both  | `?`                     | Show all keys                              |
+| Both  | `q`                     | Quit. The queue resumes on the next run    |
+| Files | `enter` `→` `l`         | Open a folder                              |
+| Files | `←` `h` `backspace`     | Go up, with the folder you left selected. `~` goes to the top |
+| Files | `d`                     | Download the selected file or folder       |
+| Files | `a`                     | Download everything in this folder         |
+| Files | `/`                     | Filter this folder by name. `esc` clears it |
+| Files | `x` / `delete`          | Delete from the server, after a `y` to confirm |
+| Files | `r`                     | Refresh                                    |
+| Queue | `space`                 | Pause or resume                            |
+| Queue | `n`                     | Run this item next                         |
+| Queue | `x` / `delete`          | Remove from the queue. Its partial file stays, so adding it again resumes |
+| Queue | `o` / `enter`           | Show the item's folder in the file list    |
+
+In the file list, `↓` and `↑` mark files and folders with transfers still to finish. Below 80 columns only one pane shows at a time; `tab` switches.
 
 To upload, drag files or folders from Explorer onto the terminal. They go to the folder open in the Files pane. If a drop doesn't register, press `u` first, then drop and press Enter. `C:\...` paths are converted to `/mnt/c/...`.
 
@@ -96,7 +108,7 @@ A rate stuck near 12 MB/s means the link is running at 100 Mbps. Check the cable
 
 ## Security
 
-Plain HTTP and no auth, on purpose. Anyone who can reach the port can read and upload files, so open it only to networks you trust. Requests can't leave the shared folder, dotfiles aren't served, and there's no delete: remove files on the laptop.
+Plain HTTP and no auth, on purpose. Anyone who can reach the port can read, upload and delete files, so open it only to networks you trust. Requests can't leave the shared folder and dotfiles aren't served. Deleting refuses the shared folder itself and anything an upload is still writing into.
 
 ## Changing the code
 

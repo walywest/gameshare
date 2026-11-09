@@ -1,7 +1,6 @@
 // game-share server: a small HTTP API for the gs client, with resumable transfers.
 //
-// Plain HTTP and no auth on purpose. Paths are still confined to the served folder,
-// and there is deliberately no delete endpoint.
+// Plain HTTP and no auth on purpose. Paths are still confined to the served folder.
 package main
 
 import (
@@ -38,7 +37,7 @@ var (
 	partDir string
 
 	uploadsMu sync.Mutex
-	uploads   = map[string]bool{} // part files with a PUT in progress
+	uploads   = map[string]string{} // part file -> target, for each PUT in progress
 )
 
 // resolve maps a request path into the served folder. Dot segments are refused,
@@ -205,7 +204,7 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 func waitForWriter(part string) {
 	for deadline := time.Now().Add(idleTimeout + 5*time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
 		uploadsMu.Lock()
-		busy := uploads[part]
+		_, busy := uploads[part]
 		uploadsMu.Unlock()
 		if !busy {
 			return
@@ -226,12 +225,12 @@ func (i idleReader) Read(p []byte) (int, error) {
 
 func putUpload(w http.ResponseWriter, r *http.Request, u *upload) {
 	uploadsMu.Lock()
-	if uploads[u.part] {
+	if _, busy := uploads[u.part]; busy {
 		uploadsMu.Unlock()
 		http.Error(w, "already uploading", http.StatusConflict)
 		return
 	}
-	uploads[u.part] = true
+	uploads[u.part] = u.target
 	uploadsMu.Unlock()
 	defer func() {
 		uploadsMu.Lock()
@@ -282,6 +281,38 @@ func putUpload(w http.ResponseWriter, r *http.Request, u *upload) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// handleDelete removes a file or a whole folder. It refuses the served root, and
+// anything an upload is still writing into, since the upload would just recreate it.
+func handleDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	target, err := resolve(r.URL.Query().Get("path"))
+	if err != nil || target == root {
+		http.Error(w, "bad path", http.StatusBadRequest)
+		return
+	}
+	if _, err := os.Lstat(target); err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	uploadsMu.Lock()
+	defer uploadsMu.Unlock() // held so no upload can start into it meanwhile
+	for _, t := range uploads {
+		if t == target || strings.HasPrefix(t, target+string(filepath.Separator)) {
+			http.Error(w, "an upload is in progress there", http.StatusConflict)
+			return
+		}
+	}
+	if err := os.RemoveAll(target); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	log.Printf("deleted %s", target)
 	writeJSON(w, map[string]any{"ok": true})
 }
 
@@ -412,6 +443,7 @@ func main() {
 	mux.HandleFunc("/api/list", handleList)
 	mux.HandleFunc("/api/tree", handleTree)
 	mux.HandleFunc("/api/upload", handleUpload)
+	mux.HandleFunc("/api/delete", handleDelete)
 	mux.HandleFunc("/dl", handleDownload)
 	mux.HandleFunc("/api/speed/ping", func(http.ResponseWriter, *http.Request) {})
 	mux.HandleFunc("/api/speed/down", handleSpeedDown)

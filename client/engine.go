@@ -15,6 +15,7 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -757,4 +758,49 @@ func (e *Engine) QueueUpload(local, remoteDir string) (int, error) {
 		return nil
 	})
 	return count, err
+}
+
+// Delete removes a remote file or folder from the server, then drops any unfinished
+// downloads of it from the queue, since they could only fail now.
+func (e *Engine) Delete(remote string) error {
+	remote = path.Clean(strings.Trim(remote, "/"))
+	if remote == "." || remote == "" {
+		return errors.New("refusing to delete the whole share")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, e.url("/api/delete", url.Values{"path": {remote}}), nil)
+	if err != nil {
+		return err
+	}
+	resp, err := e.client.Do(req)
+	if err != nil {
+		return errors.New(shortErr(err))
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 200))
+		if len(bytes.TrimSpace(msg)) == 0 {
+			return errors.New(resp.Status)
+		}
+		return errors.New(string(bytes.TrimSpace(msg)))
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	kept := e.items[:0]
+	for _, it := range e.items {
+		under := it.Remote == remote || strings.HasPrefix(it.Remote, remote+"/")
+		if under && !it.Up && it.State != done {
+			if c := e.cancels[it.ID]; c != nil {
+				c()
+				delete(e.cancels, it.ID)
+			}
+			continue
+		}
+		kept = append(kept, it)
+	}
+	e.items = kept
+	e.scheduleLocked()
+	return nil
 }
