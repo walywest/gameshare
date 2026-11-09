@@ -46,6 +46,11 @@ func TestUpdate(t *testing.T) {
 	run(t, tmp, "git", "clone", "-q", origin, cdRepo)
 	ctx := context.Background()
 
+	if _, err := update(ctx); err == nil || !strings.Contains(err.Error(), "no GIT_PASS") {
+		t.Fatalf("without GIT_PASS: %v", err)
+	}
+	os.WriteFile(filepath.Join(cdRepo, ".env"), []byte("GIT_PASS=x\n"), 0o600) // untracked, like the real one
+
 	res, err := update(ctx)
 	if err != nil || res.From != res.To || res.Restarting {
 		t.Fatalf("no change: %+v %v", res, err)
@@ -78,10 +83,12 @@ func TestUpdate(t *testing.T) {
 
 func TestDotenvAndAskpass(t *testing.T) {
 	cdRepo = t.TempDir()
-	if env, err := askpassEnv(); err != nil || env != nil {
-		t.Fatalf("no .env: %v %v", env, err)
+	if _, err := askpassEnv(); err == nil {
+		t.Fatal("no .env should be an error")
 	}
-	os.WriteFile(filepath.Join(cdRepo, ".env"), []byte("# c\nexport GIT_PASS=\"s3cr=t\"\nOTHER=1\n"), 0o600)
+	os.WriteFile(filepath.Join(cdRepo, ".env"), []byte("OTHER=1\n"), 0o600)
+	os.MkdirAll(filepath.Join(cdRepo, "server"), 0o755)
+	os.WriteFile(filepath.Join(cdRepo, "server", ".env"), []byte("# c\nexport GIT_PASS=\"s3cr=t\"\n"), 0o600)
 	env, err := askpassEnv()
 	if err != nil {
 		t.Fatal(err)

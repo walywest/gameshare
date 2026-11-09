@@ -80,7 +80,9 @@ Without the UI: `gs -get game/folder` and `gs -put /path -into game`.
 
 Start the server with `serve --cd [folder]` and `gs` can update it: press `U`, then `y`. The server runs `git pull --ff-only` in its repo. If anything under `server/` changed and still builds, it restarts on the new code. Transfers reconnect by themselves. `gs` shows what happened: already up to date, pulled with no server change, restarting, or pulled but doesn't build. A broken build leaves the old server running.
 
-The pull authenticates with `GIT_PASS` from `.env` at the repo root on the server, read on every update. For GitHub, use a personal access token with read access to the repo. `GIT_USER` is optional. `.env` is gitignored.
+The pull authenticates with `GIT_PASS` from `.env` at the repo root, or in `server/`, on the server. It's read on every update. `GIT_PASS` must be a GitHub personal access token with read access to the repo, because GitHub refuses account passwords for git. `GIT_USER` is optional. `.env` is gitignored.
+
+git never prompts during an update. Without `GIT_PASS` the update stops with an error that names the files it checked. GitHub is always reached over HTTPS, even if the server's checkout was cloned over SSH.
 
 ```sh
 GIT_PASS=github_pat_...

@@ -5,8 +5,9 @@ package main
 // restartCode so the serve loop rebuilds and restarts it. Transfers resume after
 // the restart on their own.
 //
-// The pull authenticates with GIT_PASS (and GIT_USER, if set) from the repo's .env,
-// read on every update so editing .env needs no restart.
+// The pull authenticates with GIT_PASS (and GIT_USER, if set) from .env at the repo
+// root or in server/, read on every update so editing .env needs no restart. git is
+// never allowed to prompt: without GIT_PASS the update stops with an error.
 
 import (
 	"bufio"
@@ -85,7 +86,10 @@ func update(ctx context.Context) (updateResult, error) {
 	if err != nil {
 		return res, err
 	}
-	if _, err := git(ctx, auth, "pull", "--ff-only"); err != nil {
+	pullCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	_, err = git(pullCtx, auth, "pull", "--ff-only")
+	cancel()
+	if err != nil {
 		return res, err
 	}
 	after, err := git(ctx, nil, "rev-parse", "HEAD")
@@ -129,9 +133,16 @@ func build(ctx context.Context) (string, error) {
 }
 
 func git(ctx context.Context, env []string, args ...string) (string, error) {
-	// No stored credential helpers, and never wait on a terminal prompt.
-	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", cdRepo, "-c", "credential.helper="}, args...)...)
-	cmd.Env = append(append(os.Environ(), "GIT_TERMINAL_PROMPT=0"), env...)
+	// No stored credential helpers and no prompts of any kind: no terminal, no
+	// desktop password dialog, no ssh questions. Later entries in Env win.
+	// A checkout cloned over SSH would ask for an SSH password and ignore GIT_PASS,
+	// so GitHub is always reached over HTTPS.
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", cdRepo, "-c", "credential.helper=", "-c", "core.askPass=",
+		"-c", "url.https://github.com/.insteadOf=git@github.com:",
+		"-c", "url.https://github.com/.insteadOf=ssh://git@github.com/"}, args...)...)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "SSH_ASKPASS=", "GIT_ASKPASS=", "GIT_SSH_COMMAND=ssh -o BatchMode=yes")
+	cmd.Env = append(cmd.Env, env...)
+	cmd.WaitDelay = 5 * time.Second // don't wait forever on a helper still holding the output pipe
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
 	if err := cmd.Run(); err != nil {
@@ -147,12 +158,21 @@ func git(ctx context.Context, env []string, args ...string) (string, error) {
 // askpassEnv makes git ask this same binary for the credentials, so the password
 // never lands in a file or on a command line.
 func askpassEnv() ([]string, error) {
-	vars, err := readDotenv(filepath.Join(cdRepo, ".env"))
-	if err != nil {
-		return nil, err
+	var vars map[string]string
+	var tried []string
+	for _, name := range []string{filepath.Join(cdRepo, ".env"), filepath.Join(cdRepo, "server", ".env")} {
+		v, err := readDotenv(name)
+		if err != nil {
+			return nil, err
+		}
+		tried = append(tried, name)
+		if v["GIT_PASS"] != "" {
+			vars = v
+			break
+		}
 	}
-	if vars["GIT_PASS"] == "" {
-		return nil, nil // public repo, or credentials set up some other way
+	if vars == nil {
+		return nil, fmt.Errorf("no GIT_PASS in %s", strings.Join(tried, " or "))
 	}
 	self, err := os.Executable()
 	if err != nil {
