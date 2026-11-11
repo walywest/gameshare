@@ -1,4 +1,4 @@
-# Game Share
+# MyHomeLab
 
 Moves huge game files over the LAN with transfers that always resume, and runs the homelab's other services. A small Go server (`server/`) runs on the Linux laptop, and a terminal client (`client/`) runs in WSL. Both are set up with [devenv](https://devenv.sh), from one `devenv.nix` at the repo root.
 
