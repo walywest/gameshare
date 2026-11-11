@@ -5,3 +5,12 @@ devenv.local.nix
 games/
 .faults/
 .env
+
+# Python (modules)
+__pycache__/
+*.py[cod]
+.venv/
+
+# FitFast module: local test link and the JDownloader prototype's log
+modules/fitfast/.secret-link
+modules/fitfast/jdownloader-plugin/resolver_daemon.log
