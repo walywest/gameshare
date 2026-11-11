@@ -55,6 +55,27 @@ pre { background: var(--code); border: 1px solid var(--border); border-radius: 7
 details summary { cursor: pointer; color: var(--muted); font-size: 13px; margin-top: 6px; }
 .links { font-family: ui-monospace, monospace; font-size: 12px; }
 .empty { color: var(--muted); font-size: 14px; }
+.stack { display: flex; height: 14px; background: var(--track); border-radius: 99px; overflow: hidden; margin: 10px 0 6px; }
+.stack > div { height: 100%; }
+.stack .share { background: var(--accent); } .stack .other { background: var(--muted); opacity: .55; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 13px; color: var(--muted); }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
+.big { font-size: 20px; font-weight: 600; color: var(--text); }
+table.list { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 14px; }
+table.list th { text-align: left; font-size: 12px; font-weight: 600; color: var(--muted); padding: 4px 8px 4px 0; }
+table.list td { padding: 6px 8px 6px 0; border-top: 1px solid var(--border); vertical-align: middle; }
+table.list td.num, table.list th.num { text-align: right; white-space: nowrap; color: var(--muted); font-variant-numeric: tabular-nums; }
+table.list td.name { overflow-wrap: anywhere; width: 100%; }
+table.list td.act { white-space: nowrap; text-align: right; }
+.minibar { height: 4px; background: var(--track); border-radius: 99px; overflow: hidden; margin-top: 4px; }
+.minibar > div { height: 100%; background: var(--accent); }
+a.dir, a.crumb { color: var(--accent); text-decoration: none; cursor: pointer; font-weight: 600; }
+a.dir:hover, a.crumb:hover { text-decoration: underline; }
+a.btn { display: inline-block; font-size: 13px; padding: 3px 9px; border-radius: 7px; border: 1px solid var(--border); color: var(--text); text-decoration: none; }
+.crumbs { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; font-size: 14px; flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.crumbs .sep { color: var(--muted); }
+.icon { display: inline-block; width: 1.4em; color: var(--muted); }
+@media (max-width: 560px) { table.list .opt { display: none; } }
 </style>
 </head>
 <body>
@@ -65,6 +86,32 @@ details summary { cursor: pointer; color: var(--muted); font-size: 13px; margin-
     <button class="primary" id="update">Pull &amp; reconcile</button>
   </header>
   <div class="banner" id="banner" hidden></div>
+
+  <section id="storage">
+    <h2>Storage</h2>
+    <div id="st-body" class="empty">Loading…</div>
+  </section>
+
+  <section id="transfers">
+    <h2>Transfers</h2>
+    <div class="meta">Uploads and downloads moving through the server right now. gs keeps its own queue on the WSL machine; an item shows here once it's moving.</div>
+    <div id="tr-body"></div>
+  </section>
+
+  <section id="files">
+    <h2>Files</h2>
+    <div class="row" style="margin-top:0">
+      <div class="crumbs" id="fl-crumbs"></div>
+      <button class="small" id="fl-up-files">Upload files</button>
+      <button class="small" id="fl-up-dir">Upload folder</button>
+      <input type="file" id="fl-pick-files" multiple hidden>
+      <input type="file" id="fl-pick-dir" webkitdirectory multiple hidden>
+    </div>
+    <div class="msg" id="fl-msg"></div>
+    <div id="fl-uploads"></div>
+    <div id="fl-body"></div>
+    <div class="meta" style="margin-top:8px">Downloads here are single files. For whole folders and transfers that resume after a drop, use gs.</div>
+  </section>
 
   <section>
     <h2>Services</h2>
@@ -339,10 +386,161 @@ async function pollLinkJob() {
   else if (j.phase === "done") ffMsg("");
 }
 
+// ── storage ──────────────────────────────────────────────────────────────────
+let storage = null;
+async function loadStorage(fresh) {
+  try { storage = await api("GET", "/api/storage" + (fresh ? "?fresh=1" : "")); }
+  catch (e) { $("st-body").innerHTML = `<div class="msg err">Couldn't read storage: ${esc(e.message)}</div>`; return; }
+  const s = storage, other = Math.max(0, s.used - s.share), pct = n => s.total ? (100 * n / s.total).toFixed(2) + "%" : "0";
+  const top = s.folders.slice(0, 8), max = top.length ? top[0].size || 1 : 1;
+  $("st-body").className = "";
+  $("st-body").innerHTML = `
+    <div><span class="big">${bytes(s.free)}</span> <span class="meta">free of ${bytes(s.total)} · ${s.total ? Math.round(100 * s.free / s.total) : 0}% free</span></div>
+    <div class="stack"><div class="share" style="width:${pct(s.share)}"></div><div class="other" style="width:${pct(other)}"></div></div>
+    <div class="legend">
+      <span><i style="background:var(--accent)"></i>Shared files ${bytes(s.share)}</span>
+      <span><i style="background:var(--muted);opacity:.55"></i>Everything else on the disk ${bytes(other)}</span>
+      <span><i style="background:var(--track)"></i>Free ${bytes(s.free)}</span>
+      ${s.partN ? `<span>${s.partN} unfinished upload${s.partN === 1 ? "" : "s"} kept for resuming: ${bytes(s.partials)}</span>` : ""}
+    </div>
+    ${top.length ? `<table class="list"><tr><th>Largest in the share</th><th class="num opt">Files</th><th class="num">Size</th></tr>${top.map(f => `
+      <tr><td class="name">${f.dir ? `<a class="dir" data-go="${esc(f.name)}">${esc(f.name)}</a>` : esc(f.name)}
+        <div class="minibar"><div style="width:${(100 * f.size / max).toFixed(1)}%"></div></div></td>
+        <td class="num opt">${f.files}</td><td class="num">${bytes(f.size)}</td></tr>`).join("")}</table>` : ""}
+    <div class="meta" style="margin-top:8px;overflow-wrap:anywhere">Sharing <code>${esc(s.root)}</code></div>`;
+}
+$("st-body").addEventListener("click", e => { const a = e.target.closest("[data-go]"); if (a) go(a.dataset.go); });
+
+// ── transfers ────────────────────────────────────────────────────────────────
+let lastSeen = new Map(), trActive = false;
+async function loadTransfers() {
+  let d;
+  try { d = await api("GET", "/api/transfers"); } catch { trActive = false; return; }
+  const now = Date.now(), seen = new Map();
+  trActive = d.transfers.length > 0;
+  if (!trActive) { $("tr-body").innerHTML = `<div class="empty" style="margin-top:10px">Nothing is transferring right now.</div>`; lastSeen = seen; return; }
+  let html = "";
+  for (const t of d.transfers) {
+    const key = t.kind + "|" + t.path + "|" + t.client + "|" + t.since;
+    const prev = lastSeen.get(key);
+    let speed = prev ? (t.done - prev.done) / Math.max(0.001, (now - prev.at) / 1000) : (t.done - t.start) / Math.max(1, (now - new Date(t.since)) / 1000);
+    if (prev && prev.speed) speed = 0.6 * speed + 0.4 * prev.speed;
+    seen.set(key, { done: t.done, at: now, speed });
+    const frac = t.size ? t.done / t.size : 0;
+    const facts = [`${bytes(t.done)} / ${bytes(t.size)}`, bytes(Math.max(0, speed)) + "/s"];
+    const left = eta(t.size - t.done, speed); if (left) facts.push("ETA " + left);
+    if (t.start) facts.push("resumed at " + bytes(t.start));
+    facts.push((t.kind === "upload" ? "from " : "to ") + t.client, "for " + ago(t.since));
+    html += `<div class="card"><div class="card-head">
+        <span class="name">${esc(t.path)}</span>
+        <span class="badge ${t.kind === "upload" ? "s-warn" : "s-ok"}">${t.kind === "upload" ? "↑ upload" : "↓ download"}</span>
+      </div>
+      <div class="bar"><div style="width:${(frac * 100).toFixed(1)}%"></div></div>
+      <div class="facts">${esc(facts.join(" · "))}</div></div>`;
+  }
+  lastSeen = seen;
+  $("tr-body").innerHTML = html;
+}
+
+// ── files ────────────────────────────────────────────────────────────────────
+const enc = encodeURIComponent;
+const curPath = () => decodeURIComponent(location.hash.replace(/^#\/?/, "")).replace(/\/+$/, "");
+const join = (a, b) => a ? a + "/" + b : b;
+function go(p) { location.hash = "#/" + p.split("/").map(enc).join("/"); }
+const flMsg = (t, err) => { $("fl-msg").textContent = t || ""; $("fl-msg").className = "msg" + (err ? " err" : ""); };
+let flKey = "";
+
+async function loadFiles(force) {
+  const p = curPath();
+  const parts = p ? p.split("/") : [];
+  $("fl-crumbs").innerHTML = `<a class="crumb" data-go="">share</a>` +
+    parts.map((s, i) => `<span class="sep">/</span><a class="crumb" data-go="${esc(parts.slice(0, i + 1).join("/"))}">${esc(s)}</a>`).join("");
+  let d;
+  try { d = await api("GET", "/api/list?path=" + enc(p)); }
+  catch (e) { $("fl-body").innerHTML = `<div class="msg err">${esc(e.message)}</div>`; flKey = ""; return; }
+  const sizes = {};
+  if (!p && storage) for (const f of storage.folders) sizes[f.name] = f.size;
+  const key = p + JSON.stringify(d.entries) + JSON.stringify(sizes);
+  if (key === flKey && !force) return;
+  flKey = key;
+  if (!d.entries.length) { $("fl-body").innerHTML = `<div class="empty" style="margin-top:10px">This folder is empty.</div>`; return; }
+  $("fl-body").innerHTML = `<table class="list"><tr><th>Name</th><th class="num opt">Modified</th><th class="num">Size</th><th></th></tr>${
+    d.entries.map(f => {
+      const rel = join(p, f.name);
+      const size = f.dir ? (sizes[f.name] !== undefined ? bytes(sizes[f.name]) : "—") : bytes(f.size);
+      return `<tr><td class="name"><span class="icon">${f.dir ? "▸" : "·"}</span>${f.dir ? `<a class="dir" data-go="${esc(rel)}">${esc(f.name)}</a>` : esc(f.name)}</td>
+        <td class="num opt">${f.mtime ? new Date(f.mtime).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : ""}</td>
+        <td class="num">${size}</td>
+        <td class="act">${f.dir ? "" : `<a class="btn" href="/dl?path=${enc(rel)}" download>Download</a> `}<button class="small" data-del="${esc(rel)}" data-dir="${f.dir ? 1 : ""}">Delete</button></td></tr>`;
+    }).join("")}</table>`;
+}
+window.addEventListener("hashchange", () => { flMsg(""); loadFiles(true); });
+$("files").addEventListener("click", async e => {
+  const a = e.target.closest("[data-go]"); if (a) { e.preventDefault(); go(a.dataset.go); return; }
+  const b = e.target.closest("button[data-del]"); if (!b) return;
+  const p = b.dataset.del;
+  if (!confirm(`Delete ${b.dataset.dir ? "the folder " : ""}"${p}"${b.dataset.dir ? " and everything in it" : ""} from the server? This can't be undone.`)) return;
+  b.disabled = true;
+  try { await api("DELETE", "/api/delete?path=" + enc(p)); flMsg(`Deleted ${p}.`); }
+  catch (err) { flMsg(err.message, true); b.disabled = false; }
+  loadFiles(true); loadStorage(true);
+});
+
+// Uploads use the same resumable protocol as gs: ask the offset, send the rest.
+// Picking the same file again after a drop carries on where it stopped.
+$("fl-up-files").onclick = () => $("fl-pick-files").click();
+$("fl-up-dir").onclick = () => $("fl-pick-dir").click();
+for (const id of ["fl-pick-files", "fl-pick-dir"]) $(id).addEventListener("change", e => {
+  const files = [...e.target.files]; e.target.value = "";
+  if (files.length) uploadAll(curPath(), files);
+});
+let uploading = false;
+async function uploadAll(dir, files) {
+  if (uploading) { flMsg("An upload is already running; wait for it to finish.", true); return; }
+  uploading = true; flMsg("");
+  const total = files.reduce((n, f) => n + f.size, 0);
+  let doneBytes = 0, ok = 0, failed = [];
+  const show = (name, cur) => {
+    const sent = doneBytes + cur;
+    $("fl-uploads").innerHTML = `<div class="card"><div class="card-head"><span class="name">Uploading ${ok + failed.length + 1}/${files.length}: ${esc(name)}</span></div>
+      <div class="bar"><div style="width:${total ? (100 * sent / total).toFixed(1) : 100}%"></div></div>
+      <div class="facts">${bytes(sent)} / ${bytes(total)} · keep this tab open</div></div>`;
+  };
+  for (const f of files) {
+    const rel = join(dir, f.webkitRelativePath || f.name);
+    try { await uploadOne(f, rel, cur => show(rel, cur)); ok++; }
+    catch (err) { failed.push(`${rel}: ${err.message}`); }
+    doneBytes += f.size;
+  }
+  uploading = false;
+  $("fl-uploads").innerHTML = "";
+  flMsg(`Uploaded ${ok} of ${files.length} file${files.length === 1 ? "" : "s"}.` + (failed.length ? "\nFailed (pick them again to resume):\n" + failed.join("\n") : ""), failed.length > 0);
+  loadFiles(true); loadStorage(true);
+}
+async function uploadOne(file, rel, progress) {
+  const q = `path=${enc(rel)}&size=${file.size}&mtime=${file.lastModified}`;
+  for (let attempt = 0; ; attempt++) {
+    const st = await api("GET", "/api/upload?" + q);
+    if (st.complete) { progress(file.size); return; }
+    try { await putSlice(`/api/upload?${q}&offset=${st.offset}`, file.slice(st.offset), n => progress(st.offset + n)); return; }
+    catch (err) { if (attempt >= 4) throw err; await new Promise(r => setTimeout(r, 1000 * (attempt + 1))); }
+  }
+}
+function putSlice(url, blob, progress) {
+  return new Promise((resolve, reject) => {
+    const x = new XMLHttpRequest();
+    x.open("PUT", url);
+    x.upload.onprogress = e => progress(e.loaded);
+    x.onload = () => x.status < 300 ? resolve() : reject(new Error(x.responseText.trim() || "HTTP " + x.status));
+    x.onerror = () => reject(new Error("connection dropped"));
+    x.send(blob);
+  });
+}
+
 // ── polling ──────────────────────────────────────────────────────────────────
 async function loop() {
-  await Promise.all([loadServices(), loadFitFast()]);
-  setTimeout(loop, ffBusy || openLogs.size ? 1000 : 5000);
+  await Promise.all([loadServices(), loadFitFast(), loadTransfers(), loadStorage().then(() => loadFiles())]);
+  setTimeout(loop, ffBusy || openLogs.size || trActive || uploading ? 1000 : 5000);
 }
 loop();
 </script>

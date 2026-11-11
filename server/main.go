@@ -259,6 +259,7 @@ func putUpload(w http.ResponseWriter, r *http.Request, u *upload) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	defer track(&transfer{Kind: "upload", Path: shareRel(u.target), Client: clientOf(r), Size: u.size, Start: offset, pos: u.offset})()
 	// Bytes written before a dropped connection stay in the part file for the resume.
 	body := idleReader{io.LimitReader(r.Body, u.size-offset), http.NewResponseController(w)}
 	_, copyErr := io.CopyBuffer(struct{ io.Writer }{f}, body, make([]byte, copyBuffer))
@@ -354,6 +355,9 @@ func handleDownload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not a file", http.StatusBadRequest)
 		return
 	}
+	var start int64
+	fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-", &start)
+	defer track(&transfer{Kind: "download", Path: shareRel(target), Client: clientOf(r), Size: info.Size(), Start: start, pos: filePos(f)})()
 	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": info.Name()}))
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("ETag", fmt.Sprintf(`"%d-%d"`, info.Size(), info.ModTime().UnixMilli()))
@@ -473,6 +477,8 @@ func main() {
 	mux.HandleFunc("/api/speed/down", handleSpeedDown)
 	mux.HandleFunc("/api/speed/up", handleSpeedUp)
 	mux.HandleFunc("/api/speed/disk", handleSpeedDisk)
+	mux.HandleFunc("GET /api/storage", handleStorage)
+	mux.HandleFunc("GET /api/transfers", handleTransfers)
 	mux.HandleFunc("/api/version", func(w http.ResponseWriter, _ *http.Request) {
 		v := map[string]any{"commit": runningCommit, "cd": cdRepo != "", "started": started.Format(time.RFC3339)}
 		if sup != nil {

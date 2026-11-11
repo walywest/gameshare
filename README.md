@@ -80,6 +80,9 @@ Without the UI: `gs -get game/folder` and `gs -put /path -into game`.
 
 The server serves a page at `http://<server>:8080/` that brings everything together:
 
+- **Storage**: free and total space on the shared folder's disk, what the share uses, its largest folders, and unfinished uploads kept for resuming (`GET /api/storage`).
+- **Transfers**: every upload and download moving through the server right now, with progress, speed, ETA and the client's address (`GET /api/transfers`). gs's queue lives on the WSL machine, so items waiting there show up once they start.
+- **Files**: browse the share, download single files, delete, and upload files or whole folders. Browser uploads use the same resumable protocol as gs, so picking a file again after a drop carries on where it stopped. The address bar keeps the folder (`/#/Game/sub`).
 - **Services**: what's running, its health, PID, uptime and restarts, its log, and a **Restart** button.
 - **Pull & reconcile**: the same update as `U` in gs (see CD mode), with what changed.
 - **FitFast downloads**: paste a `fitgirl-repacks.site` page or `fuckingfast.co` links and press **Download on server**. The game downloads on the server into `FitFast/<Game>/` in the shared folder, then extracts. Pull it to WSL with gs once it's done. **Get links only** gives you the signed links for another downloader instead. Downloads resume across server restarts.
