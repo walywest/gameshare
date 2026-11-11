@@ -169,6 +169,15 @@ func TestUpdateSummary(t *testing.T) {
 		{UpdateResult{From: "a", To: "b", Log: "b one\nc two", ServerCode: true, Restarting: true}, "Server restarting", false},
 		{UpdateResult{From: "a", To: "b", Log: "b", ServerCode: true, BuildErr: "x.go:1: bad\nmore"}, "old server keeps running: x.go:1: bad", true},
 	}
+	svc := []ServiceChange{{"fitfast", "restarted"}}
+	cases = append(cases, []struct {
+		r    UpdateResult
+		want string
+		err  bool
+	}{
+		{UpdateResult{From: "a", To: "b", Log: "b", Services: svc}, "Services: fitfast restarted", false},
+		{UpdateResult{From: "a", To: "b", Log: "b", Services: svc, ShellChanged: true}, "restart serve by hand", true},
+	}...)
 	for _, c := range cases {
 		got, isErr := c.r.Summary()
 		if !strings.Contains(got, c.want) || isErr != c.err || strings.Contains(got, "more") {

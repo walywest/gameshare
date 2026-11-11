@@ -1,0 +1,15 @@
+{
+  "services": {
+    "fitfast": {
+      "title": "FitFast downloader",
+      "dir": "modules/fitfast",
+      "run": ["python", "fitfast_web.py", "--host", "127.0.0.1", "--port", "8787"],
+      "env": { "FITFAST_ROOT": "${ROOT}", "PYTHONUNBUFFERED": "1" },
+      "devenv": true,
+      "port": 8787,
+      "health": "/api/status",
+      "busy": "/api/downloads/busy",
+      "watch": ["modules/fitfast", "devenv.nix", "devenv.yaml", "devenv.lock"]
+    }
+  }
+}

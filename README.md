@@ -1,6 +1,6 @@
 # Game Share
 
-Moves huge game files over the LAN with transfers that always resume. A small Go server (`server/`) runs on the Linux laptop, and a terminal client (`client/`) runs in WSL. Both are set up with [devenv](https://devenv.sh).
+Moves huge game files over the LAN with transfers that always resume, and runs the homelab's other services. A small Go server (`server/`) runs on the Linux laptop, and a terminal client (`client/`) runs in WSL. Both are set up with [devenv](https://devenv.sh), from one `devenv.nix` at the repo root.
 
 ## Usage
 
@@ -76,9 +76,67 @@ To upload, drag files or folders from Explorer onto the terminal. They go to the
 
 Without the UI: `gs -get game/folder` and `gs -put /path -into game`.
 
+## Homelab page and services
+
+The server serves a page at `http://<server>:8080/` that brings everything together:
+
+- **Services**: what's running, its health, PID, uptime and restarts, its log, and a **Restart** button.
+- **Pull & reconcile**: the same update as `U` in gs (see CD mode), with what changed.
+- **FitFast downloads**: paste a `fitgirl-repacks.site` page or `fuckingfast.co` links and press **Download on server**. The game downloads on the server into `FitFast/<Game>/` in the shared folder, then extracts. Pull it to WSL with gs once it's done. **Get links only** gives you the signed links for another downloader instead. Downloads resume across server restarts.
+
+### Declaring services
+
+`homelab.json` at the repo root is the desired state, like a Kubernetes manifest. The server keeps reality in line with it, checking every 5 seconds:
+
+- a declared service that isn't running is started;
+- one whose entry in `homelab.json`, or any file under its `watch` paths in git, changed is restarted;
+- one that crashes is restarted, with a backoff from 2 seconds up to 5 minutes. After three quick crashes in a row it shows as `crashloop`, but it keeps being retried;
+- one whose `health` check fails for 30 seconds is restarted;
+- one that's removed, or set to `"enabled": false`, is stopped.
+
+```json
+{
+  "services": {
+    "fitfast": {
+      "title": "FitFast downloader",
+      "dir": "modules/fitfast",
+      "run": ["python", "fitfast_web.py", "--host", "127.0.0.1", "--port", "8787"],
+      "env": { "FITFAST_ROOT": "${ROOT}", "PYTHONUNBUFFERED": "1" },
+      "devenv": true,
+      "port": 8787,
+      "health": "/api/status",
+      "busy": "/api/downloads/busy",
+      "watch": ["modules/fitfast", "devenv.nix", "devenv.yaml", "devenv.lock"]
+    }
+  }
+}
+```
+
+| Field | Meaning |
+| ----- | ------- |
+| `dir`, `run` | Folder in the repo, and the command to run there |
+| `env` | Extra environment. `${ROOT}` is the shared folder, `${REPO}` the repo |
+| `devenv` | Run inside the repo's `devenv shell`, so it gets the packages `devenv.nix` declares, current as of its last start |
+| `port`, `health` | Where it listens on 127.0.0.1, and a path that answers 200 when healthy. The page and API reach it at `/svc/<name>/` |
+| `busy` | A path listing folders in the share it's writing into. Deleting those from gs is refused |
+| `watch` | Repo paths whose change restarts it. Defaults to `dir` |
+| `startupSeconds` | How long a new process may fail its health check. Defaults to 20 minutes with `devenv`, since the first start builds the environment, and 1 minute without |
+| `enabled` | `false` stops it but keeps it listed |
+
+A service never takes the server down. When `homelab.json` doesn't parse, the last good version stays in force and the page shows the error. A service that won't start shows its error and log on the page. Services stop cleanly when the server stops or restarts.
+
+The server runs services only when it knows its repo, which `serve` tells it. The first start of a `devenv` service builds its environment, so it shows as `starting` for a few minutes. FitFast also fetches its ~1 GB stealth browser in the background the first time, and resolves links without the browser meanwhile.
+
 ## CD mode
 
-Start the server with `serve --cd [folder]` and `gs` can update it: press `U`, then `y`. The server runs `git pull --ff-only` in its repo. If anything under `server/` changed and still builds, it restarts on the new code. Transfers reconnect by themselves. `gs` shows what happened: already up to date, pulled with no server change, restarting, or pulled but doesn't build. A broken build leaves the old server running.
+Start the server with `serve --cd [folder]` and you can update everything from GitHub: press `U` in gs and then `y`, or press **Pull & reconcile** on the page. The server runs `git pull --ff-only` in its repo, and then:
+
+- if anything under `server/` changed and still builds, it stops the services and restarts on the new code, which starts them again. Transfers reconnect by themselves. A broken build leaves the old server running;
+- otherwise it reconciles straight away: the services the pull changed restart, new ones start and removed ones stop. The server itself keeps running.
+
+gs and the page show what happened: already up to date, the services the pull restarted, started or stopped, restarting, or pulled but doesn't build.
+
+Services run in a fresh `devenv shell`, so a pull that changes `devenv.nix` reaches them when they restart. The one exception is the `serve` script itself, which keeps running the version it started with: when a pull changes it, gs and the page say to restart `serve` by hand.
 
 The pull authenticates with `GIT_PASS` from `.env` at the repo root, or in `server/`, on the server. It's read on every update. `GIT_PASS` must be a GitHub personal access token with read access to the repo, because GitHub refuses account passwords for git. `GIT_USER` is optional. `.env` is gitignored.
 
@@ -88,7 +146,7 @@ git never prompts during an update. Without `GIT_PASS` the update stops with an 
 GIT_PASS=github_pat_...
 ```
 
-In CD mode, `serve` builds the server from `server/` with Go instead of using the devenv package, then rebuilds it after each update. It doesn't reload itself, so after a pull that changes `devenv.nix`, restart `serve` by hand. A pull fails rather than merging if the server's checkout has local commits or edits that clash.
+In CD mode, `serve` builds the server from `server/` with Go instead of using the devenv package, then rebuilds it after each update. A pull fails rather than merging if the server's checkout has local commits or edits that clash.
 
 ## Resuming
 
@@ -123,9 +181,13 @@ A rate stuck near 12 MB/s means the link is running at 100 Mbps. Check the cable
 
 ## Security
 
-Plain HTTP and no auth, on purpose. Anyone who can reach the port can read, upload and delete files, so open it only to networks you trust. Requests can't leave the shared folder and dotfiles aren't served. Deleting refuses the shared folder itself and anything an upload is still writing into. In CD mode, anyone who can reach the port can also make the server pull and restart. They can only pull what's already on GitHub.
+Plain HTTP and no auth, on purpose: this is for the LAN only. Anyone who can reach the port can read, upload and delete files, start and stop downloads, and restart services, so don't forward it to the internet. Services listen on 127.0.0.1 only and are reached through the server. Requests can't leave the shared folder and dotfiles aren't served. Deleting refuses the shared folder itself and anything an upload is still writing into. In CD mode, anyone who can reach the port can also make the server pull and restart. They can only pull what's already on GitHub, and only what `homelab.json` there declares runs.
 
 ## Changing the code
+
+Server tests run the test binary as a fake service, and FitFast's manager has its own tests: `cd modules/fitfast && python -m unittest discover tests`, inside `devenv shell`.
+
+FitFast came in with `git subtree`, so its history is in this repo. Its Textual TUI (`fitfast_tui.py`) is kept but is legacy; the page replaces it.
 
 devenv can miss edits in `server/` and keep running the old build. After changing it, enter the shell with:
 

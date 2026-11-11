@@ -40,6 +40,15 @@ type updateResult struct {
 	ServerCode bool   `json:"serverCode"`         // whether server/ changed
 	BuildErr   string `json:"buildErr,omitempty"` // set when the new code doesn't build
 	Restarting bool   `json:"restarting"`
+	// Services the pull started, restarted or stopped. Empty when the server
+	// restarts, since the new process starts them all again.
+	Services []change `json:"services,omitempty"`
+	// ShellChanged means the serve script itself changed, which only takes
+	// effect when serve is restarted by hand.
+	ShellChanged bool `json:"shellChanged,omitempty"`
+	// ManifestErr says the pulled homelab.json is broken, so services keep
+	// running as the last good one declared.
+	ManifestErr string `json:"manifestErr,omitempty"`
 }
 
 func handleUpdate(w http.ResponseWriter, r *http.Request) {
@@ -71,7 +80,8 @@ func handleUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	go func() {
 		time.Sleep(500 * time.Millisecond)
-		log.Printf("updated %s -> %s, restarting", res.From, res.To)
+		log.Printf("updated %s -> %s, stopping services and restarting", res.From, res.To)
+		stopServices()
 		os.Exit(restartCode)
 	}()
 }
@@ -100,12 +110,19 @@ func update(ctx context.Context) (updateResult, error) {
 	if before == after {
 		return res, nil
 	}
+	res.ShellChanged = serveScript(ctx, before) != serveScript(ctx, after)
 	res.Log, _ = git(ctx, nil, "log", "--oneline", "-20", before+".."+after)
 	changed, err := git(ctx, nil, "diff", "--name-only", before, after, "--", "server")
 	if err != nil {
 		return res, err
 	}
 	if res.ServerCode = changed != ""; !res.ServerCode {
+		if sup != nil {
+			res.Services = sup.reconcile()
+			sup.mu.Lock()
+			res.ManifestErr = sup.mErr
+			sup.mu.Unlock()
+		}
 		return res, nil
 	}
 	if out, err := build(ctx); err != nil {
@@ -115,6 +132,21 @@ func update(ctx context.Context) (updateResult, error) {
 	}
 	res.Restarting = true
 	return res, nil
+}
+
+// serveScript is the serve loop's text in devenv.nix at a commit. It runs for as
+// long as serve does, so a change to it is the one thing an update can't apply.
+func serveScript(ctx context.Context, commit string) string {
+	nix, err := git(ctx, nil, "show", commit+":devenv.nix")
+	if err != nil {
+		return ""
+	}
+	_, rest, ok := strings.Cut(nix, "scripts.serve.exec")
+	if !ok {
+		return ""
+	}
+	body, _, _ := strings.Cut(rest, "\n  '';")
+	return body
 }
 
 // build checks that the pulled server compiles. The serve loop builds it again for

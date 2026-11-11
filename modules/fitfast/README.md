@@ -1,3 +1,5 @@
+> **Part of the homelab now.** This folder is FitFast as a service of the MyGamesSolutions homelab: the server starts it from `homelab.json`, and its downloads run on the server and are managed from the homelab page (see the root README). The terminal UI described below (`fitfast_tui.py`) is legacy: it's kept for reference but nothing runs it, and its `devenv`/`make` setup is now the root `devenv.nix`.
+
 # FitFast Downloader — terminal edition
 
 **Download FitGirl Repacks from fuckingfast.co, from your terminal.** Paste a game page, press Fetch, press Start. It collects every part, gets past Cloudflare, downloads the whole set, and unpacks it for you — with live per-file progress, resume, and a speed limit.

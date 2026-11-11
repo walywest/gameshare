@@ -807,12 +807,21 @@ func (e *Engine) Delete(remote string) error {
 
 // UpdateResult is the server's reply to an update request.
 type UpdateResult struct {
-	From       string `json:"from"`
-	To         string `json:"to"`
-	Log        string `json:"log"`
-	ServerCode bool   `json:"serverCode"`
-	BuildErr   string `json:"buildErr"`
-	Restarting bool   `json:"restarting"`
+	From         string          `json:"from"`
+	To           string          `json:"to"`
+	Log          string          `json:"log"`
+	ServerCode   bool            `json:"serverCode"`
+	BuildErr     string          `json:"buildErr"`
+	Restarting   bool            `json:"restarting"`
+	Services     []ServiceChange `json:"services"`
+	ShellChanged bool            `json:"shellChanged"`
+	ManifestErr  string          `json:"manifestErr"`
+}
+
+// ServiceChange is what an update did to one homelab service.
+type ServiceChange struct {
+	Name   string `json:"name"`
+	Action string `json:"action"` // started, restarted, stopped
 }
 
 // UpdateServer asks a server in CD mode to pull its code from GitHub and restart if
@@ -855,6 +864,20 @@ func (r UpdateResult) Summary() (string, bool) {
 		pulled += "s"
 	}
 	pulled += ")"
+	var extra []string
+	for _, s := range r.Services {
+		extra = append(extra, s.Name+" "+s.Action)
+	}
+	tail := ""
+	if len(extra) > 0 {
+		tail = ". Services: " + strings.Join(extra, ", ")
+	}
+	if r.ShellChanged {
+		tail += ". The serve script changed: restart serve by hand"
+	}
+	if r.ManifestErr != "" {
+		tail += ". homelab.json is broken, services keep the last good one: " + r.ManifestErr
+	}
 	switch {
 	case r.From == r.To:
 		return "Server already up to date at " + r.To, false
@@ -862,7 +885,9 @@ func (r UpdateResult) Summary() (string, bool) {
 		first, _, _ := strings.Cut(r.BuildErr, "\n")
 		return pulled + ", but it doesn't build, so the old server keeps running: " + first, true
 	case r.Restarting:
-		return pulled + ". Server restarting; transfers resume by themselves", false
+		return pulled + ". Server restarting; transfers resume by themselves" + tail, false
+	case tail != "":
+		return pulled + tail, r.ShellChanged || r.ManifestErr != ""
 	default:
 		return pulled + ". No server code changed, so no restart", false
 	}

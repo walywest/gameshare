@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -62,9 +63,43 @@ func TestUpdate(t *testing.T) {
 		t.Fatalf("docs only: %+v %v", res, err)
 	}
 
+	// A pull that declares a service starts it, and one that changes its watched
+	// files restarts it, with no server restart.
+	sup = newSupervisor(cdRepo, t.TempDir())
+	defer func() { sup.stopAll(); sup = nil }()
+	spec := helperSpec(freePort(t), nil)
+	spec.Watch = []string{"modules/web"}
+	b, _ := json.Marshal(manifest{Services: map[string]serviceSpec{"web": spec}})
+	commit(t, dev, "homelab.json", string(b))
+	res, err = update(ctx)
+	if err != nil || res.Restarting || len(res.Services) != 1 || res.Services[0].Action != "started" {
+		t.Fatalf("new service: %+v %v", res, err)
+	}
+	commit(t, dev, "modules/web/app.txt", "v2\n")
+	res, err = update(ctx)
+	if err != nil || len(res.Services) != 1 || res.Services[0].Action != "restarted" {
+		t.Fatalf("watched change: %+v %v", res, err)
+	}
+	commit(t, dev, "modules/other.txt", "x\n")
+	if res, err = update(ctx); err != nil || len(res.Services) != 0 || res.ShellChanged {
+		t.Fatalf("unrelated change: %+v %v", res, err)
+	}
+	commit(t, dev, "devenv.nix", "{\n  scripts.serve.exec = ''\n    one\n  '';\n  enterShell = ''a'';\n}\n")
+	if res, err = update(ctx); err != nil || !res.ShellChanged {
+		t.Fatalf("serve script added: %+v %v", res, err)
+	}
+	commit(t, dev, "devenv.nix", "{\n  scripts.serve.exec = ''\n    one\n  '';\n  enterShell = ''b'';\n}\n")
+	if res, err = update(ctx); err != nil || res.ShellChanged {
+		t.Fatalf("devenv change outside serve: %+v %v", res, err)
+	}
+	commit(t, dev, "devenv.nix", "{\n  scripts.serve.exec = ''\n    two\n  '';\n  enterShell = ''b'';\n}\n")
+	if res, err = update(ctx); err != nil || !res.ShellChanged {
+		t.Fatalf("serve script change: %+v %v", res, err)
+	}
+
 	commit(t, dev, "server/main.go", "package main\n\nfunc main() { println() }\n")
 	res, err = update(ctx)
-	if err != nil || !res.ServerCode || !res.Restarting || res.BuildErr != "" {
+	if err != nil || !res.ServerCode || !res.Restarting || res.BuildErr != "" || len(res.Services) != 0 {
 		t.Fatalf("server change: %+v %v", res, err)
 	}
 

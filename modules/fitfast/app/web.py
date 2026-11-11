@@ -39,7 +39,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from .bootstrap import browser_ready, browser_staleness_warning
+from .bootstrap import browser_ready, browser_staleness_warning, install_in_subprocess
 from .config import APP_VERSION
 from .log import get_logger, setup_logging
 from .resolve_proc import SubprocessResolver
@@ -49,7 +49,9 @@ from .scrape_proc import SubprocessScraper
 from .scraper import ScrapeError, fast_scrape, game_title_from_links, is_fitgirl_url
 
 STATIC_DIR = Path(__file__).resolve().parent / "web_static"
-ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
+MODULE_DIR = Path(__file__).resolve().parent.parent
+# The module's own .env first, then the homelab repo's, which holds GIT_PASS too.
+ENV_FILES = (MODULE_DIR / ".env", MODULE_DIR.parent.parent / ".env")
 
 MAX_BODY = 256 * 1024
 MAX_LINKS = 400
@@ -371,11 +373,39 @@ def _read_dotenv(path: Path) -> dict[str, str]:
 
 
 def load_password() -> str:
-    """The PASS value from the repo's .env (an exported PASS overrides it)."""
-    pw = os.environ.get("PASS", "").strip() or _read_dotenv(ENV_FILE).get("PASS", "").strip()
+    """The PASS value from .env (an exported PASS overrides it)."""
+    pw = os.environ.get("PASS", "").strip()
+    for f in ENV_FILES:
+        pw = pw or _read_dotenv(f).get("PASS", "").strip()
     if not pw:
-        raise SystemExit(f"!! no password: put PASS=<password> in {ENV_FILE}")
+        raise SystemExit(f"!! no password: put PASS=<password> in {ENV_FILES[0]} or {ENV_FILES[1]}")
     return pw
+
+
+# ── server-side downloads ─────────────────────────────────────────────────────
+
+MANAGER = None          # app.manager.Manager, when started with --root
+BROWSER = {"installing": False, "status": "", "error": None}
+_DL_PATH = re.compile(r"^/api/downloads/([A-Za-z0-9_-]{6,40})(?:/(pause|resume|retry))?$")
+
+
+def _install_browser() -> None:
+    """Fetch the Camoufox browser in the background on first start, so a fresh
+    server needs no manual step. Browserless resolving works meanwhile."""
+    BROWSER["installing"] = True
+    try:
+        install_in_subprocess(lambda m: BROWSER.__setitem__("status", m))
+        BROWSER["status"] = "installed"
+    except Exception as e:
+        BROWSER["error"] = str(e)[:300]
+        get_logger().warning("web: browser install failed: %s", e)
+    finally:
+        BROWSER["installing"] = False
+
+
+def _flag(data: dict, key: str, default: bool) -> bool:
+    v = data.get(key, default)
+    return v if isinstance(v, bool) else default
 
 
 # ── HTTP ──────────────────────────────────────────────────────────────────────
@@ -397,6 +427,7 @@ class Handler(BaseHTTPRequestHandler):
     server_version = f"FitFast/{APP_VERSION}"
     sys_version = ""
     password: str = ""
+    open_access = False     # bound to loopback behind the homelab server, which guards access
 
     # Quiet the default per-request stderr line; we log what matters ourselves.
     def log_message(self, fmt, *args):  # noqa: D401
@@ -416,6 +447,8 @@ class Handler(BaseHTTPRequestHandler):
         self._send(status, json.dumps(data).encode(), "application/json; charset=utf-8")
 
     def _authorized(self) -> bool:
+        if self.open_access:
+            return True
         header = self.headers.get("Authorization", "")
         if header.startswith("Basic "):
             try:
@@ -443,8 +476,15 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/status":
             return self._json(HTTPStatus.OK, {
                 "version": APP_VERSION, "browser_ready": browser_ready(),
+                "browser": BROWSER, "downloads": MANAGER is not None,
                 "warning": browser_staleness_warning(), "parallel": PARALLEL,
                 "max_links": MAX_LINKS})
+        if path == "/api/downloads":
+            if MANAGER is None:
+                return self._json(HTTPStatus.NOT_FOUND, {"error": "server-side downloads are off (no --root)"})
+            return self._json(HTTPStatus.OK, MANAGER.snapshot())
+        if path == "/api/downloads/busy":
+            return self._json(HTTPStatus.OK, {"paths": MANAGER.busy_paths() if MANAGER else []})
         m = _JOB_PATH.match(path)
         if m and not m.group(2):
             job = JOBS.get(m.group(1))
@@ -495,6 +535,8 @@ class Handler(BaseHTTPRequestHandler):
             threading.Thread(target=run_job, args=(job,), daemon=True,
                              name=f"job-{job.id}").start()
             return self._json(HTTPStatus.CREATED, {"id": job.id})
+        if path.startswith("/api/downloads"):
+            return self._post_download(path)
         m = _JOB_PATH.match(path)
         if m and m.group(2):
             job = JOBS.get(m.group(1))
@@ -503,9 +545,62 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(HTTPStatus.OK, {"retried": retry_failed(job)})
         self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
+    def _post_download(self, path: str):
+        if MANAGER is None:
+            return self._json(HTTPStatus.NOT_FOUND, {"error": "server-side downloads are off (no --root)"})
+        data = self._read_json()
+        if data is None:
+            return
+        if path == "/api/downloads":
+            extract = _flag(data, "extract", True)
+            delete = _flag(data, "delete_archives", False)
+            title = None
+            if data.get("job"):
+                job = JOBS.get(str(data["job"]))
+                if job is None:
+                    return self._json(HTTPStatus.NOT_FOUND, {"error": "link job not found (expired?)"})
+                with job.lock:
+                    page, links, title = None, [it.source for it in job.items], job.title
+                if not links:
+                    return self._json(HTTPStatus.BAD_REQUEST, {"error": "that job has no links yet"})
+            else:
+                try:
+                    page, links = parse_input(str(data.get("text", "")))
+                except InputError as e:
+                    return self._json(HTTPStatus.BAD_REQUEST, {"error": str(e)})
+            try:
+                game = MANAGER.add(page, links, extract, delete, title)
+            except ValueError as e:
+                return self._json(HTTPStatus.TOO_MANY_REQUESTS, {"error": str(e)})
+            get_logger().info("web: download %s queued by %s", game.id, self.client_address[0])
+            return self._json(HTTPStatus.CREATED, {"id": game.id})
+        if path == "/api/downloads/limit":
+            try:
+                mbps = float(data.get("mbps", 0))
+            except (TypeError, ValueError):
+                return self._json(HTTPStatus.BAD_REQUEST, {"error": "mbps must be a number"})
+            MANAGER.set_limit(mbps)
+            return self._json(HTTPStatus.OK, {"limit_mbps": MANAGER.limit_mbps})
+        m = _DL_PATH.match(path)
+        if not m or not m.group(2):
+            return self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+        gid, action = m.group(1), m.group(2)
+        if MANAGER.get(gid) is None:
+            return self._json(HTTPStatus.NOT_FOUND, {"error": "no such download"})
+        ok = {"pause": MANAGER.pause, "resume": MANAGER.resume, "retry": MANAGER.retry}[action](gid)
+        if not ok:
+            return self._json(HTTPStatus.CONFLICT, {"error": f"can't {action} it now"})
+        return self._json(HTTPStatus.OK, {"ok": True})
+
     def do_DELETE(self):
         if not self._authorized():
             return
+        path = self.path.split("?", 1)[0]
+        m = _DL_PATH.match(path)
+        if m and not m.group(2):
+            if MANAGER is None or not MANAGER.remove(m.group(1)):
+                return self._json(HTTPStatus.NOT_FOUND, {"error": "no such download"})
+            return self._json(HTTPStatus.OK, {"removed": True})
         m = _JOB_PATH.match(self.path.split("?", 1)[0])
         job = JOBS.get(m.group(1)) if m and not m.group(2) else None
         if job is None:
@@ -519,23 +614,46 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="FitFast web UI (link resolver only)")
     p.add_argument("--host", default=os.environ.get("FITFAST_WEB_HOST", "0.0.0.0"))
     p.add_argument("--port", type=int, default=int(os.environ.get("FITFAST_WEB_PORT", "8787")))
+    p.add_argument("--root", default=os.environ.get("FITFAST_ROOT", ""),
+                   help="download games on the server, into <root>/FitFast")
     args = p.parse_args(argv)
 
     setup_logging()
     log = get_logger()
-    Handler.password = load_password()
+    # Loopback only means the homelab server proxies to it and guards access, so
+    # no password is needed. Anywhere else, PASS is required as before.
+    if args.host in ("127.0.0.1", "localhost", "::1"):
+        Handler.open_access = True
+    else:
+        Handler.password = load_password()
 
     if not browser_ready():
-        print("!! stealth browser not installed — run: camoufox sync && camoufox fetch",
+        print("!! stealth browser not installed; fetching it in the background (~1 GB)",
               file=sys.stderr)
+        threading.Thread(target=_install_browser, daemon=True, name="browser-install").start()
     elif (stale := browser_staleness_warning()):
         print(f"!! {stale}", file=sys.stderr)
+
+    global MANAGER
+    if args.root:
+        from .manager import Manager
+        MANAGER = Manager(args.root)
+        MANAGER.start()
+        print(f"server-side downloads go to {Path(args.root) / 'FitFast'}")
+
+    # The homelab server stops services with SIGTERM: stop aria2 cleanly so its
+    # control files are saved, and save the queue.
+    import signal
+
+    def _term(*_):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, _term)
 
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     httpd.daemon_threads = True
     print(f"FitFast web UI on http://{args.host}:{args.port}/  "
           f"(browsers in parallel: {PARALLEL})")
-    print("  login: any username + PASS from .env")
+    print("  open access on loopback" if Handler.open_access else "  login: any username + PASS from .env")
     log.info("web: listening on %s:%d", args.host, args.port)
     try:
         httpd.serve_forever()
@@ -544,4 +662,6 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         httpd.server_close()
         _pool.shutdown(wait=False, cancel_futures=True)
+        if MANAGER is not None:
+            MANAGER.shutdown()
     return 0

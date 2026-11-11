@@ -17,6 +17,8 @@ import (
 	"mime"
 	"net/http"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path"
 	"path/filepath"
 	"sort"
@@ -303,6 +305,19 @@ func handleDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
+	if sup != nil {
+		for _, p := range sup.busyPaths() {
+			busy, err := resolve(p)
+			if err != nil || busy == root {
+				continue
+			}
+			sep := string(filepath.Separator)
+			if busy == target || strings.HasPrefix(busy, target+sep) || strings.HasPrefix(target, busy+sep) {
+				http.Error(w, "a service is still downloading into "+p, http.StatusConflict)
+				return
+			}
+		}
+	}
 	uploadsMu.Lock()
 	defer uploadsMu.Unlock() // held so no upload can start into it meanwhile
 	for _, t := range uploads {
@@ -459,8 +474,18 @@ func main() {
 	mux.HandleFunc("/api/speed/up", handleSpeedUp)
 	mux.HandleFunc("/api/speed/disk", handleSpeedDisk)
 	mux.HandleFunc("/api/version", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, map[string]any{"commit": runningCommit, "cd": cdRepo != "", "started": started.Format(time.RFC3339)})
+		v := map[string]any{"commit": runningCommit, "cd": cdRepo != "", "started": started.Format(time.RFC3339)}
+		if sup != nil {
+			v["services"] = sup.views()
+		}
+		writeJSON(w, v)
 	})
+	mux.HandleFunc("GET /api/services", handleServices)
+	mux.HandleFunc("GET /api/services/{name}/logs", handleServiceLogs)
+	mux.HandleFunc("POST /api/services/{name}/restart", handleServiceRestart)
+	mux.HandleFunc("POST /api/reconcile", handleReconcile)
+	mux.HandleFunc("/svc/{name}/", handleProxy)
+	mux.HandleFunc("GET /{$}", handlePage)
 	if cdRepo = os.Getenv("GAMESHARE_CD"); cdRepo != "" {
 		if g := os.Getenv("GAMESHARE_GO"); g != "" {
 			goBin = g
@@ -470,6 +495,48 @@ func main() {
 		log.Printf("CD mode: gs can update this server from %s", cdRepo)
 	}
 
+	startServices()
+
 	log.Printf("serving %s on :%s", root, os.Args[1])
-	log.Fatal(http.ListenAndServe(":"+os.Args[1], mux))
+	err = http.ListenAndServe(":"+os.Args[1], mux)
+	stopServices()
+	log.Fatal(err)
+}
+
+// startServices runs the services homelab.json declares, when the server knows
+// its repo. It never fails the server: a problem shows on the page instead.
+func startServices() {
+	repo := cdRepo
+	if repo == "" {
+		repo = os.Getenv("GAMESHARE_REPO")
+	}
+	if repo == "" {
+		log.Printf("services: no repo (GAMESHARE_CD or GAMESHARE_REPO), so none run")
+		return
+	}
+	if runningCommit == "" {
+		if out, err := exec.Command("git", "-C", repo, "rev-parse", "--short", "HEAD").Output(); err == nil {
+			runningCommit = strings.TrimSpace(string(out))
+		}
+	}
+	sup = newSupervisor(repo, root)
+	if sup.devenvBin == "" {
+		log.Printf("services: devenv not found; services that need it will show as failed")
+	}
+	go sup.run()
+
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	go func() {
+		sig := <-sigs
+		log.Printf("%v: stopping services", sig)
+		stopServices()
+		os.Exit(0)
+	}()
+}
+
+func stopServices() {
+	if sup != nil {
+		sup.stopAll()
+	}
 }

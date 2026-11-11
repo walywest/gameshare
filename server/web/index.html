@@ -1,0 +1,350 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Homelab</title>
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --text: #1b1f24; --muted: #5f6b7a; --border: #dde2e8;
+  --accent: #2f6fde; --accent-text: #fff; --ok: #1f8a4c; --warn: #b7791f; --bad: #c53030;
+  --track: #e7ebf0; --code: #f0f2f5;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #111418; --panel: #1a1e24; --text: #e6e9ee; --muted: #93a0b0; --border: #2b313a;
+    --accent: #5b8ff0; --ok: #46c27a; --warn: #e0a83a; --bad: #f06464; --track: #2b313a; --code: #14171c; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+main { max-width: 960px; margin: 0 auto; padding: 20px 16px 60px; }
+header { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 18px; }
+h1 { font-size: 22px; margin: 0; flex: 1; }
+h2 { font-size: 17px; margin: 0 0 12px; }
+.meta { color: var(--muted); font-size: 13px; }
+section { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 18px; }
+button { font: inherit; padding: 7px 13px; border-radius: 7px; border: 1px solid var(--border);
+  background: var(--panel); color: var(--text); cursor: pointer; }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
+button.small { padding: 3px 9px; font-size: 13px; }
+button:disabled { opacity: .5; cursor: default; }
+textarea, input[type=number] { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border);
+  border-radius: 7px; padding: 8px; }
+textarea { width: 100%; min-height: 70px; resize: vertical; }
+input[type=number] { width: 80px; }
+label { font-size: 14px; display: inline-flex; gap: 6px; align-items: center; }
+.row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 10px; }
+.msg { margin-top: 10px; font-size: 14px; white-space: pre-wrap; }
+.msg.err { color: var(--bad); }
+.banner { padding: 10px 12px; border-radius: 8px; background: var(--code); border: 1px solid var(--border); margin-bottom: 18px; font-size: 14px; white-space: pre-wrap; }
+.banner.err { border-color: var(--bad); color: var(--bad); }
+.card { border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-top: 10px; }
+.card-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.card-head .name { font-weight: 600; flex: 1; min-width: 140px; overflow-wrap: anywhere; }
+.badge { font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 999px; border: 1px solid currentColor; }
+.s-ok { color: var(--ok); } .s-warn { color: var(--warn); } .s-bad { color: var(--bad); } .s-muted { color: var(--muted); }
+.facts { color: var(--muted); font-size: 13px; margin-top: 6px; overflow-wrap: anywhere; }
+pre { background: var(--code); border: 1px solid var(--border); border-radius: 7px; padding: 10px; font-size: 12px;
+  max-height: 320px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; margin: 8px 0 0; }
+.bar { height: 8px; background: var(--track); border-radius: 99px; overflow: hidden; margin-top: 8px; }
+.bar > div { height: 100%; background: var(--accent); width: 0; transition: width .4s; }
+.parts { margin-top: 8px; font-size: 13px; }
+.parts table { width: 100%; border-collapse: collapse; }
+.parts td { padding: 3px 6px 3px 0; border-top: 1px solid var(--border); vertical-align: top; overflow-wrap: anywhere; }
+.parts td.num { text-align: right; white-space: nowrap; color: var(--muted); }
+details summary { cursor: pointer; color: var(--muted); font-size: 13px; margin-top: 6px; }
+.links { font-family: ui-monospace, monospace; font-size: 12px; }
+.empty { color: var(--muted); font-size: 14px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Homelab</h1>
+    <span class="meta" id="meta">connecting…</span>
+    <button class="primary" id="update">Pull &amp; reconcile</button>
+  </header>
+  <div class="banner" id="banner" hidden></div>
+
+  <section>
+    <h2>Services</h2>
+    <div class="meta">Declared in <code>homelab.json</code>. The server keeps each one running and restarts it when its files change.</div>
+    <div id="services"></div>
+  </section>
+
+  <section id="fitfast">
+    <h2>FitFast downloads</h2>
+    <div class="meta" id="ff-status"></div>
+    <textarea id="ff-text" placeholder="Paste a fitgirl-repacks.site game page, or fuckingfast.co links"></textarea>
+    <div class="row">
+      <button class="primary" id="ff-download">Download on server</button>
+      <button id="ff-links">Get links only</button>
+      <label><input type="checkbox" id="ff-extract" checked> Extract when done</label>
+      <label><input type="checkbox" id="ff-delete"> Delete archives after</label>
+    </div>
+    <div class="msg" id="ff-msg"></div>
+    <div id="ff-linkjob"></div>
+    <div class="row">
+      <label>Speed limit <input type="number" id="ff-limit" min="0" step="1" value="0"> MB/s (0 = none)</label>
+      <button class="small" id="ff-limit-set">Set</button>
+      <span class="meta" id="ff-speed"></span>
+    </div>
+    <div id="ff-games"></div>
+  </section>
+</main>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const FF = "/svc/fitfast";
+let version = null, openLogs = new Set(), openParts = new Set(), linkJob = null;
+
+async function api(method, path, body) {
+  const opt = { method, headers: {} };
+  if (body !== undefined) { opt.headers["Content-Type"] = "application/json"; opt.body = JSON.stringify(body); }
+  const r = await fetch(path, opt);
+  const text = await r.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch { data = null; }
+  if (!r.ok) throw new Error((data && data.error) || text.trim() || r.statusText);
+  return data;
+}
+function esc(s) { return String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+function bytes(n) {
+  if (!n) return "0 B";
+  const u = ["B", "KB", "MB", "GB", "TB"]; let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return (i ? n.toFixed(1) : n) + " " + u[i];
+}
+function ago(t) {
+  if (!t) return "";
+  const s = Math.max(0, (Date.now() - new Date(t).getTime()) / 1000);
+  if (s < 60) return Math.round(s) + "s";
+  if (s < 3600) return Math.round(s / 60) + "m";
+  if (s < 86400) return (s / 3600).toFixed(1) + "h";
+  return (s / 86400).toFixed(1) + "d";
+}
+function eta(left, speed) {
+  if (!speed || left <= 0) return "";
+  const s = left / speed;
+  if (s < 60) return Math.round(s) + "s";
+  if (s < 3600) return Math.round(s / 60) + "m";
+  return Math.floor(s / 3600) + "h" + String(Math.round(s % 3600 / 60)).padStart(2, "0");
+}
+function banner(text, err) { const b = $("banner"); b.hidden = !text; b.textContent = text || ""; b.className = "banner" + (err ? " err" : ""); }
+
+// ── services ─────────────────────────────────────────────────────────────────
+const stateClass = { running: "s-ok", starting: "s-warn", stopping: "s-warn", unhealthy: "s-bad", exited: "s-bad",
+  crashloop: "s-bad", failed: "s-bad", stopped: "s-muted", disabled: "s-muted" };
+
+async function loadServices() {
+  let d;
+  try { d = await api("GET", "/api/services"); }
+  catch (e) { $("meta").textContent = "server unreachable: " + e.message; return; }
+  version = d;
+  $("meta").textContent = `commit ${d.commit || "?"} · up ${ago(d.started)}` + (d.cd ? "" : " · CD off");
+  $("update").textContent = d.cd ? "Pull & reconcile" : "Reconcile";
+  const list = $("services");
+  let html = d.manifestErr ? `<div class="msg err">${esc(d.manifestErr)}</div>` : "";
+  if (!d.services.length) html += `<div class="empty">No services declared.</div>`;
+  for (const s of d.services) {
+    const facts = [];
+    if (s.pid) facts.push("pid " + s.pid);
+    if (s.since) facts.push("up " + ago(s.since));
+    if (s.retryAt) facts.push("next try in " + Math.max(0, Math.round((new Date(s.retryAt) - Date.now()) / 1000)) + "s");
+    facts.push("restarts " + s.restarts);
+    if (s.port) facts.push("port " + s.port);
+    if (s.devenv) facts.push("devenv");
+    facts.push("spec " + s.hash);
+    const note = s.state === "starting" && s.devenv ? " (the first start builds its environment and can take minutes)" : "";
+    html += `<div class="card"><div class="card-head">
+        <span class="name">${esc(s.title || s.name)} <span class="meta">${esc(s.name)}</span></span>
+        <span class="badge ${stateClass[s.state] || "s-muted"}">${esc(s.state)}</span>
+        <button class="small" data-restart="${esc(s.name)}" ${s.state === "disabled" ? "disabled" : ""}>Restart</button>
+        <button class="small" data-logs="${esc(s.name)}">${openLogs.has(s.name) ? "Hide log" : "Log"}</button>
+      </div>
+      <div class="facts">${esc(facts.join(" · "))}${esc(note)}</div>
+      ${s.lastErr ? `<div class="facts s-bad">${esc(s.lastErr)}</div>` : ""}
+      ${openLogs.has(s.name) ? `<pre id="log-${esc(s.name)}">…</pre>` : ""}
+    </div>`;
+  }
+  list.innerHTML = html;
+  for (const name of openLogs) loadLog(name);
+}
+async function loadLog(name) {
+  try {
+    const d = await api("GET", `/api/services/${encodeURIComponent(name)}/logs?n=200`);
+    const el = $("log-" + name);
+    if (el) { const atEnd = el.scrollTop + el.clientHeight >= el.scrollHeight - 4;
+      el.textContent = d.lines.join("\n") || "(nothing yet)"; if (atEnd) el.scrollTop = el.scrollHeight; }
+  } catch {}
+}
+$("services").addEventListener("click", async e => {
+  const b = e.target.closest("button"); if (!b) return;
+  if (b.dataset.logs) { const n = b.dataset.logs; openLogs.has(n) ? openLogs.delete(n) : openLogs.add(n); loadServices(); }
+  if (b.dataset.restart) {
+    b.disabled = true;
+    try { await api("POST", `/api/services/${encodeURIComponent(b.dataset.restart)}/restart`); banner(`Restarted ${b.dataset.restart}.`); }
+    catch (err) { banner(err.message, true); }
+    loadServices();
+  }
+});
+
+$("update").addEventListener("click", async () => {
+  const b = $("update"); b.disabled = true;
+  try {
+    if (!version || !version.cd) {
+      const r = await api("POST", "/api/reconcile");
+      banner(describeChanges(r.changes) || "Everything already matches homelab.json.");
+      return;
+    }
+    banner("Pulling…");
+    const r = await api("POST", "/api/update");
+    const lines = [];
+    if (r.from === r.to) lines.push(`Already up to date at ${r.to}.`);
+    else lines.push(`Pulled ${r.from} → ${r.to}:`, r.log || "");
+    if (r.buildErr) lines.push("The new server doesn't build, so the old one keeps running:", r.buildErr);
+    const ch = describeChanges(r.services); if (ch) lines.push(ch);
+    if (r.manifestErr) lines.push("homelab.json is broken, so services keep the last good version: " + r.manifestErr);
+    if (r.shellChanged) lines.push("The serve script changed: restart serve by hand for that part.");
+    if (r.restarting) { lines.push("The server is restarting with the new code…"); banner(lines.join("\n")); await waitRestart(r.to, lines); }
+    else banner(lines.join("\n"));
+  } catch (e) { banner("Update failed: " + e.message, true); }
+  finally { b.disabled = false; loadServices(); }
+});
+function describeChanges(list) {
+  if (!list || !list.length) return "";
+  return "Services: " + list.map(c => `${c.name} ${c.action}${c.why ? " (" + c.why + ")" : ""}`).join(", ");
+}
+async function waitRestart(to, lines) {
+  const before = version && version.started;
+  for (let i = 0; i < 300; i++) {
+    await new Promise(r => setTimeout(r, 1000));
+    try {
+      const v = await api("GET", "/api/version");
+      if (v.started !== before) { lines[lines.length - 1] = `The server restarted on ${v.commit}. Services are starting again.`; banner(lines.join("\n")); return; }
+    } catch {}
+  }
+  banner(lines.concat("The server hasn't come back after 5 minutes. Check it on the box.").join("\n"), true);
+}
+
+// ── FitFast ──────────────────────────────────────────────────────────────────
+const ffMsg = (t, err) => { $("ff-msg").textContent = t || ""; $("ff-msg").className = "msg" + (err ? " err" : ""); };
+const gameClass = { done: "s-ok", downloading: "s-warn", scraping: "s-warn", extracting: "s-warn", queued: "s-muted", paused: "s-muted", failed: "s-bad" };
+let ffBusy = false, limitTouched = false;
+
+async function loadFitFast() {
+  let status, d;
+  try { [status, d] = await Promise.all([api("GET", FF + "/api/status"), api("GET", FF + "/api/downloads")]); }
+  catch (e) { $("ff-status").textContent = "FitFast isn't available: " + e.message; $("ff-games").innerHTML = ""; ffBusy = false; return; }
+  const bits = [];
+  if (status.browser && status.browser.installing) bits.push("Installing the stealth browser: " + (status.browser.status || "starting") + ". Links still resolve without it.");
+  else if (status.browser && status.browser.error) bits.push("Browser install failed: " + status.browser.error);
+  else if (!status.browser_ready) bits.push("Stealth browser not installed; only browserless resolving works.");
+  if (status.warning) bits.push(status.warning);
+  $("ff-status").textContent = bits.join(" ");
+  if (!limitTouched) $("ff-limit").value = d.limit_mbps || 0;
+  $("ff-speed").textContent = d.speed ? "Now " + bytes(d.speed) + "/s" : "";
+  ffBusy = d.games.some(g => ["downloading", "scraping", "extracting"].includes(g.state));
+
+  if (!d.games.length) { $("ff-games").innerHTML = `<div class="empty" style="margin-top:10px">No downloads yet. Finished games land in the shared folder under FitFast/, ready to pull with gs.</div>`; return; }
+  let html = "";
+  for (const g of d.games.slice().reverse()) {
+    const frac = g.total ? g.completed / g.total : (g.state === "done" ? 1 : 0);
+    const c = g.counts || {};
+    const parts = g.parts.length;
+    const facts = [`${c.done || 0}/${parts} parts`];
+    if (g.total) facts.push(`${bytes(g.completed)} / ${bytes(g.total)}`);
+    if (g.speed) facts.push(bytes(g.speed) + "/s", "ETA " + eta(g.total - g.completed, g.speed));
+    if (c.error) facts.push(c.error + " retrying");
+    if (c.failed) facts.push(c.failed + " failed");
+    if (g.folder) facts.push("→ " + g.folder);
+    const canPause = ["queued", "scraping", "downloading"].includes(g.state);
+    html += `<div class="card"><div class="card-head">
+        <span class="name">${esc(g.title || "Untitled")}</span>
+        <span class="badge ${gameClass[g.state] || "s-muted"}">${esc(g.state)}</span>
+        ${canPause ? `<button class="small" data-act="pause" data-id="${g.id}">Pause</button>` : ""}
+        ${g.state === "paused" ? `<button class="small" data-act="resume" data-id="${g.id}">Resume</button>` : ""}
+        ${(c.failed || c.error || g.state === "failed") ? `<button class="small" data-act="retry" data-id="${g.id}">Retry</button>` : ""}
+        <button class="small" data-act="remove" data-id="${g.id}">Remove</button>
+      </div>
+      <div class="bar"><div style="width:${(frac * 100).toFixed(1)}%"></div></div>
+      <div class="facts">${esc(facts.join(" · "))}</div>
+      ${g.message ? `<div class="facts">${esc(g.message)}</div>` : ""}
+      ${g.error ? `<div class="facts s-bad">${esc(g.error)}</div>` : ""}
+      ${parts ? `<details data-parts="${g.id}" ${openParts.has(g.id) ? "open" : ""}><summary>Parts</summary><div class="parts"><table>${
+        g.parts.map(p => `<tr><td>${esc(p.filename)}${p.error && p.state !== "done" ? `<div class="s-bad">${esc(p.error)}</div>` : ""}</td>
+          <td class="num">${esc(p.state)}</td>
+          <td class="num">${p.total ? (p.state === "done" ? bytes(p.total) : `${(100 * p.completed / p.total).toFixed(0)}%`) : ""}</td>
+          <td class="num">${p.speed ? bytes(p.speed) + "/s" : ""}</td></tr>`).join("")}</table></div></details>` : ""}
+    </div>`;
+  }
+  $("ff-games").innerHTML = html;
+}
+$("ff-games").addEventListener("toggle", e => {
+  const id = e.target.dataset && e.target.dataset.parts; if (!id) return;
+  e.target.open ? openParts.add(id) : openParts.delete(id);
+}, true);
+$("ff-games").addEventListener("click", async e => {
+  const b = e.target.closest("button[data-act]"); if (!b) return;
+  const { act, id } = b.dataset;
+  if (act === "remove" && !confirm("Remove this download from the queue? Files already downloaded stay on the server.")) return;
+  b.disabled = true;
+  try {
+    if (act === "remove") await api("DELETE", `${FF}/api/downloads/${id}`);
+    else await api("POST", `${FF}/api/downloads/${id}/${act}`, {});
+  } catch (err) { ffMsg(err.message, true); }
+  loadFitFast();
+});
+$("ff-download").addEventListener("click", async () => {
+  const text = $("ff-text").value.trim();
+  if (!text && !linkJob) { ffMsg("Paste a FitGirl page or FuckingFast links first.", true); return; }
+  const body = { extract: $("ff-extract").checked, delete_archives: $("ff-delete").checked };
+  if (text) body.text = text; else body.job = linkJob;
+  try { await api("POST", FF + "/api/downloads", body); ffMsg("Queued on the server."); $("ff-text").value = ""; linkJob = null; $("ff-linkjob").innerHTML = ""; }
+  catch (e) { ffMsg(e.message, true); }
+  loadFitFast();
+});
+$("ff-limit").addEventListener("input", () => { limitTouched = true; });
+$("ff-limit-set").addEventListener("click", async () => {
+  try { await api("POST", FF + "/api/downloads/limit", { mbps: Number($("ff-limit").value) || 0 }); limitTouched = false; ffMsg("Speed limit set."); }
+  catch (e) { ffMsg(e.message, true); }
+});
+
+// Links only: the original FitFast flow, for handing links to another downloader.
+$("ff-links").addEventListener("click", async () => {
+  const text = $("ff-text").value.trim();
+  if (!text) { ffMsg("Paste a FitGirl page or FuckingFast links first.", true); return; }
+  try { const { id } = await api("POST", FF + "/api/jobs", { text }); linkJob = id; ffMsg("Getting links…"); pollLinkJob(); }
+  catch (e) { ffMsg(e.message, true); }
+});
+async function pollLinkJob() {
+  if (!linkJob) return;
+  let j;
+  try { j = await api("GET", `${FF}/api/jobs/${linkJob}`); } catch (e) { ffMsg(e.message, true); return; }
+  const done = j.items.filter(i => i.status === "done");
+  const urls = done.map(i => i.url);
+  $("ff-linkjob").innerHTML = `<div class="card"><div class="card-head"><span class="name">${esc(j.title || "Links")}</span>
+      <span class="badge ${j.phase === "done" ? "s-ok" : j.phase === "failed" ? "s-bad" : "s-warn"}">${esc(j.phase)}</span>
+      <button class="small" id="ff-copy" ${urls.length ? "" : "disabled"}>Copy ${urls.length} link${urls.length === 1 ? "" : "s"}</button>
+      <button class="small" id="ff-job-dl">Download these on server</button></div>
+    ${j.error ? `<div class="facts s-bad">${esc(j.error)}</div>` : ""}
+    <div class="facts">${done.length}/${j.items.length} resolved. Signed links expire, so use them soon.</div>
+    ${urls.length ? `<pre class="links">${esc(urls.join("\n"))}</pre>` : ""}</div>`;
+  $("ff-copy").onclick = () => navigator.clipboard.writeText(urls.join("\n")).then(() => ffMsg("Copied."), () => ffMsg("Couldn't copy; select the links by hand.", true));
+  $("ff-job-dl").onclick = async () => {
+    try { await api("POST", FF + "/api/downloads", { job: linkJob, extract: $("ff-extract").checked, delete_archives: $("ff-delete").checked });
+      ffMsg("Queued on the server."); loadFitFast(); } catch (e) { ffMsg(e.message, true); }
+  };
+  if (["queued", "scraping", "resolving"].includes(j.phase)) setTimeout(pollLinkJob, 1500);
+  else if (j.phase === "done") ffMsg("");
+}
+
+// ── polling ──────────────────────────────────────────────────────────────────
+async function loop() {
+  await Promise.all([loadServices(), loadFitFast()]);
+  setTimeout(loop, ffBusy || openLogs.size ? 1000 : 5000);
+}
+loop();
+</script>
+</body>
+</html>
