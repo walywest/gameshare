@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# devenv / direnv (NixOS dev shell)
+.devenv/
+.devenv.flake.nix
+devenv.lock
+.direnv/
+
+# JDownloader plugin prototype: auto-launched daemon's log
+jdownloader-plugin/resolver_daemon.log
+
+# Internal design notes (not for the public repo)
+docs/superpowers/
+
+# Claude Code project config
+.claude/
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# Local test link (never commit)
+.secret-link
+
+# Local secrets (web UI password: PASS=...)
+.env

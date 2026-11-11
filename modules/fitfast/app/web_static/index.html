@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FitFast Links</title>
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --text: #16181d; --muted: #646b78;
+  --border: #dde1e7; --accent: #2f6fed; --accent-text: #ffffff;
+  --ok: #1a7f4b; --err: #c23a3a; --warn-bg: #fff4d6; --warn-text: #7a5600;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111317; --panel: #1a1d23; --text: #e7e9ee; --muted: #9aa1ad;
+    --border: #2c313a; --accent: #5b8cff; --accent-text: #0b0d10;
+    --ok: #4cc38a; --err: #ff7b7b; --warn-bg: #3a2f10; --warn-text: #ffd479;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 15px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+main { max-width: 960px; margin: 0 auto; padding: 24px 16px 64px; }
+h1 { font-size: 22px; margin: 0 0 4px; }
+.sub { color: var(--muted); margin: 0 0 20px; }
+.panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+textarea { width: 100%; min-height: 110px; resize: vertical; padding: 10px; border-radius: 8px;
+  border: 1px solid var(--border); background: var(--bg); color: var(--text); font: 13px/1.45 var(--mono); }
+.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 10px; }
+button { font: inherit; padding: 8px 14px; border-radius: 8px; border: 1px solid var(--border);
+  background: var(--panel); color: var(--text); cursor: pointer; }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
+button:disabled { opacity: .5; cursor: default; }
+.spacer { flex: 1; }
+.msg { margin-top: 10px; color: var(--err); white-space: pre-wrap; }
+.warn { background: var(--warn-bg); color: var(--warn-text); border-radius: 8px; padding: 10px 12px; margin-bottom: 16px; }
+.summary { display: flex; gap: 16px; flex-wrap: wrap; align-items: baseline; }
+.summary strong { font-size: 17px; }
+.muted { color: var(--muted); }
+.bar { height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; margin: 10px 0 4px; }
+.bar > div { height: 100%; background: var(--accent); width: 0; transition: width .3s; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed; }
+th, td { text-align: left; padding: 7px 6px; border-top: 1px solid var(--border); vertical-align: top; }
+th { color: var(--muted); font-weight: 500; border-top: none; }
+td.name { overflow-wrap: anywhere; }
+td.st { width: 92px; }
+th.st { width: 92px; } th.act { width: 70px; }
+.s-done { color: var(--ok); } .s-error { color: var(--err); }
+.s-resolving { color: var(--accent); } .s-queued, .s-cancelled { color: var(--muted); }
+.err { color: var(--err); font-size: 12px; }
+.tip { font-size: 13px; color: var(--muted); margin-top: 8px; }
+code { font-family: var(--mono); font-size: 12.5px; }
+@media (max-width: 560px) { th.act, td.act { display: none; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>FitFast Links</h1>
+  <p class="sub">Paste a FitGirl repack page (or FuckingFast links). You get back direct download links with Cloudflare already handled. Copy them into JDownloader, aria2 or any download manager.</p>
+
+  <div id="warn" class="warn" hidden></div>
+
+  <div class="panel">
+    <textarea id="input" spellcheck="false" placeholder="https://fitgirl-repacks.site/some-game/
+— or —
+https://fuckingfast.co/abc123#Game.part01.rar
+https://fuckingfast.co/def456#Game.part02.rar"></textarea>
+    <div class="row">
+      <button id="go" class="primary">Get links</button>
+      <button id="cancel" hidden>Cancel</button>
+      <span class="spacer"></span>
+      <span class="muted" id="hint">Usually takes a few seconds.</span>
+    </div>
+    <div id="msg" class="msg" hidden></div>
+  </div>
+
+  <div id="result" class="panel" hidden>
+    <div class="summary">
+      <strong id="title"></strong>
+      <span class="muted" id="phase"></span>
+    </div>
+    <textarea id="links" readonly spellcheck="false"></textarea>
+    <div class="row">
+      <button id="copy" class="primary" disabled>Copy links</button>
+      <button id="dl" disabled>Save as .txt</button>
+      <button id="retry" hidden>Try missing links again</button>
+      <span class="muted" id="copied"></span>
+    </div>
+    <div id="missing" class="err" hidden></div>
+    <p class="tip">The links expire after a while, so use them soon.</p>
+  </div>
+</main>
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  let jobId = null, timer = null, last = null;
+  const STORE = "fitfast.job";
+
+  const api = async (method, path, body) => {
+    const r = await fetch(path, {
+      method, headers: body ? {"Content-Type": "application/json"} : {},
+      body: body ? JSON.stringify(body) : undefined, credentials: "same-origin",
+    });
+    let data = {};
+    try { data = await r.json(); } catch (_) {}
+    if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+    return data;
+  };
+
+  const showMsg = t => { $("msg").textContent = t || ""; $("msg").hidden = !t; };
+  const doneUrls = () => (last ? last.items.filter(i => i.url).map(i => i.url) : []);
+
+  function render(job) {
+    last = job;
+    $("result").hidden = false;
+    const c = job.counts, total = job.items.length;
+    const active = ["queued", "scraping", "resolving"].includes(job.phase);
+    $("title").textContent = job.title || "Your links";
+
+    let phase = "";
+    if (active) phase = total ? `Getting links… ${c.done} of ${total}` : "Getting links…";
+    else if (job.phase === "cancelled") phase = "Stopped";
+    else if (total) phase = `${c.done} of ${total} links`;
+    $("phase").textContent = phase;
+    if (job.phase === "failed") showMsg(job.error || "Something went wrong.");
+
+    const urls = doneUrls();
+    $("links").value = urls.join("\n");
+    $("links").hidden = !urls.length;
+    $("copy").disabled = $("dl").disabled = !urls.length;
+    $("copy").textContent = urls.length ? `Copy ${urls.length} link${urls.length > 1 ? "s" : ""}` : "Copy links";
+
+    const missing = active ? 0 : c.error;
+    $("missing").textContent = missing ? `${missing} link${missing > 1 ? "s" : ""} couldn't be fetched.` : "";
+    $("missing").hidden = !missing;
+    $("retry").hidden = !missing;
+    setBusy(active);
+  }
+
+  function setBusy(busy) {
+    $("go").disabled = busy;
+    $("cancel").hidden = !busy;
+  }
+
+  async function poll() {
+    if (!jobId) return;
+    try {
+      const job = await api("GET", `/api/jobs/${jobId}`);
+      render(job);
+      if (!["queued", "scraping", "resolving"].includes(job.phase)) { stopPoll(); return; }
+    } catch (e) {
+      showMsg(e.message); stopPoll(); setBusy(false);
+      if (/not found/.test(e.message)) { try { localStorage.removeItem(STORE); } catch (_) {} }
+      return;
+    }
+    timer = setTimeout(poll, 1500);
+  }
+  const stopPoll = () => { clearTimeout(timer); timer = null; };
+  const startPoll = () => { stopPoll(); poll(); };
+
+  async function copy(urls, note) {
+    const text = urls.join("\n");
+    try { await navigator.clipboard.writeText(text); }
+    catch (_) {
+      // Clipboard API needs HTTPS; fall back to a hidden textarea for plain HTTP.
+      const t = document.createElement("textarea");
+      t.value = text; t.style.position = "fixed"; t.style.opacity = "0";
+      document.body.append(t); t.select();
+      try { document.execCommand("copy"); } catch (_) {}
+      t.remove();
+    }
+    $("copied").textContent = note || `Copied ${urls.length} link(s)`;
+    setTimeout(() => { $("copied").textContent = ""; }, 2500);
+  }
+
+  $("go").onclick = async () => {
+    showMsg("");
+    const text = $("input").value.trim();
+    if (!text) { showMsg("Paste a link first."); return; }
+    setBusy(true);
+    try {
+      const { id } = await api("POST", "/api/jobs", { text });
+      jobId = id;
+      try { localStorage.setItem(STORE, id); } catch (_) {}
+      $("links").value = "";
+      startPoll();
+    } catch (e) { showMsg(e.message); setBusy(false); }
+  };
+
+  $("cancel").onclick = async () => {
+    if (!jobId) return;
+    try { await api("DELETE", `/api/jobs/${jobId}`); } catch (e) { showMsg(e.message); }
+    startPoll();
+  };
+
+  $("retry").onclick = async () => {
+    try { await api("POST", `/api/jobs/${jobId}/retry`, {}); startPoll(); }
+    catch (e) { showMsg(e.message); }
+  };
+
+  $("copy").onclick = () => copy(doneUrls());
+
+  $("dl").onclick = () => {
+    const blob = new Blob([doneUrls().join("\n") + "\n"], { type: "text/plain" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = ((last && last.title) || "links").replace(/[^\w.-]+/g, "_") + ".txt";
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  };
+
+  $("input").addEventListener("keydown", e => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) $("go").click();
+  });
+
+  api("GET", "/api/status").then(s => {
+    const w = !s.browser_ready ? "Some links may fail: the server's backup browser isn't installed." : null;
+    if (w) { $("warn").textContent = w; $("warn").hidden = false; }
+  }).catch(() => {});
+
+  // Pick up a job that was running when the tab was closed or reloaded.
+  try { jobId = localStorage.getItem(STORE); } catch (_) {}
+  if (jobId) startPoll();
+})();
+</script>
+</body>
+</html>
