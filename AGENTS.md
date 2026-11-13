@@ -12,7 +12,8 @@ server/            Go server (port 8080): file API, CD updates, service supervis
   update.go        CD: POST /api/update -> git pull, then rebuild+exit 75 or reconcile services
   services.go      the reconciler: homelab.json -> running processes, /svc/<name>/ proxy
   storage.go       GET /api/storage (disk, folder sizes, .rar folders) and /api/transfers (live, read from file offsets)
-  folders.go       GET /zip (folder as a stored zip, streamed) and POST /api/archives/delete (RAR volumes only)
+  folders.go       GET /zip (folder as a stored zip, streamed; skip=archives for extracted files only),
+                   POST /api/archives/delete (RAR volumes only), POST /api/extracted/delete (all but the download)
   web.go, web/     the homelab page (single embedded index.html, vanilla JS, no CDN)
   preflight.go     disk/NIC checks printed at startup
 client/            gs: Bubble Tea TUI for transfers (runs in WSL). Its only homelab link is `U` (update)

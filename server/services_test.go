@@ -215,6 +215,9 @@ func TestDeleteRefusesBusyServicePaths(t *testing.T) {
 			t.Errorf("archives %s: got %d, want 409", p, c)
 		}
 	}
+	if c := extractedReq("FitFast/Game").Code; c != http.StatusConflict {
+		t.Errorf("extracted: got %d, want 409", c)
+	}
 	if _, err := os.Stat(filepath.Join(root, "FitFast", "Game", "a.rar")); err != nil {
 		t.Error("a busy folder's archive was deleted")
 	}

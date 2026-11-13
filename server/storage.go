@@ -97,16 +97,27 @@ type folderUse struct {
 }
 
 type storageView struct {
-	Root     string      `json:"root"`
-	Total    int64       `json:"total"`    // the disk the share is on
-	Free     int64       `json:"free"`     // what we can still write
-	Used     int64       `json:"used"`     // by everything on the disk
-	Share    int64       `json:"share"`    // by the shared files
-	Folders  []folderUse `json:"folders"`  // top level of the share, largest first
-	Partials int64       `json:"partials"` // unfinished uploads, kept for resuming
-	PartN    int         `json:"partN"`
-	Archives []folderUse `json:"archives"` // folders holding RAR volumes, by folder path
-	Scanned  time.Time   `json:"scanned"`
+	Root     string       `json:"root"`
+	Total    int64        `json:"total"`    // the disk the share is on
+	Free     int64        `json:"free"`     // what we can still write
+	Used     int64        `json:"used"`     // by everything on the disk
+	Share    int64        `json:"share"`    // by the shared files
+	Folders  []folderUse  `json:"folders"`  // top level of the share, largest first
+	Partials int64        `json:"partials"` // unfinished uploads, kept for resuming
+	PartN    int          `json:"partN"`
+	Archives []archiveDir `json:"archives"` // folders holding RAR volumes, largest first
+	Scanned  time.Time    `json:"scanned"`
+}
+
+// archiveDir is a folder holding RAR volumes, and what sits beside them: the
+// extracted files, meaning everything under it that isn't part of the download
+// (see extractedFile).
+type archiveDir struct {
+	Name           string `json:"name"`
+	Files          int    `json:"files"`
+	Size           int64  `json:"size"`
+	ExtractedFiles int    `json:"extractedFiles"`
+	Extracted      int64  `json:"extracted"`
 }
 
 var (
@@ -128,8 +139,9 @@ func (v *storageView) diskUse() {
 }
 
 func scanStorage() *storageView {
-	v := &storageView{Root: root, Folders: []folderUse{}, Archives: []folderUse{}, Scanned: time.Now()}
-	archives := map[string]*folderUse{}
+	v := &storageView{Root: root, Folders: []folderUse{}, Archives: []archiveDir{}, Scanned: time.Now()}
+	archives := map[string]*archiveDir{}
+	plain := map[string]*archiveDir{} // per folder, files that could be extracted ones
 	items, _ := os.ReadDir(root)
 	for _, it := range items {
 		if strings.HasPrefix(it.Name(), ".") {
@@ -149,18 +161,23 @@ func scanStorage() *storageView {
 			if info, err := d.Info(); err == nil && d.Type().IsRegular() {
 				f.Size += info.Size()
 				f.Files++
-				if isArchive(d.Name()) && !strings.HasPrefix(d.Name(), ".") {
-					dir := shareRel(filepath.Dir(p))
-					if dir == "." {
-						dir = ""
-					}
-					a := archives[dir]
+				dir := shareRel(filepath.Dir(p))
+				if dir == "." {
+					dir = ""
+				}
+				add := func(m map[string]*archiveDir) {
+					a := m[dir]
 					if a == nil {
-						a = &folderUse{Name: dir, Dir: true}
-						archives[dir] = a
+						a = &archiveDir{Name: dir}
+						m[dir] = a
 					}
 					a.Size += info.Size()
 					a.Files++
+				}
+				if isArchive(d.Name()) && !strings.HasPrefix(d.Name(), ".") {
+					add(archives)
+				} else if extractedFile(d.Name()) {
+					add(plain)
 				}
 			}
 			return nil
@@ -170,6 +187,12 @@ func scanStorage() *storageView {
 	}
 	sort.Slice(v.Folders, func(a, b int) bool { return v.Folders[a].Size > v.Folders[b].Size })
 	for _, a := range archives {
+		for d, p := range plain {
+			if a.Name == "" || d == a.Name || strings.HasPrefix(d, a.Name+"/") {
+				a.Extracted += p.Size
+				a.ExtractedFiles += p.Files
+			}
+		}
 		v.Archives = append(v.Archives, *a)
 	}
 	sort.Slice(v.Archives, func(a, b int) bool { return v.Archives[a].Size > v.Archives[b].Size })

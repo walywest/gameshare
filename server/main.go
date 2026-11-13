@@ -491,6 +491,7 @@ func main() {
 	mux.HandleFunc("GET /api/transfers", handleTransfers)
 	mux.HandleFunc("GET /zip", handleZip)
 	mux.HandleFunc("POST /api/archives/delete", handleDeleteArchives)
+	mux.HandleFunc("POST /api/extracted/delete", handleDeleteExtracted)
 	mux.HandleFunc("/api/version", func(w http.ResponseWriter, _ *http.Request) {
 		v := map[string]any{"commit": runningCommit, "cd": cdRepo != "", "started": started.Format(time.RFC3339)}
 		if sup != nil {

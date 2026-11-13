@@ -109,6 +109,8 @@ h3 { font-size: 14px; margin: 16px 0 0; }
       <button class="small" id="fl-up-dir">Upload folder</button>
       <button class="small" id="fl-zip">Download this folder (.zip)</button>
       <button class="small danger" id="fl-arch" data-arch="" hidden></button>
+      <button class="small" id="fl-xdl" data-zipx="" hidden></button>
+      <button class="small danger" id="fl-xdel" data-xdel="" hidden></button>
       <input type="file" id="fl-pick-files" multiple hidden>
       <input type="file" id="fl-pick-dir" webkitdirectory multiple hidden>
     </div>
@@ -299,6 +301,7 @@ async function loadFitFast() {
   $("ff-speed").textContent = d.speed ? "Now " + bytes(d.speed) + "/s" : "";
   ffBusy = d.games.some(g => ["downloading", "scraping", "extracting"].includes(g.state));
   ffGames = d.games;
+  renderStorage();
 
   if (!d.games.length) { $("ff-games").innerHTML = `<div class="empty" style="margin-top:10px">No downloads yet. Finished games land in the shared folder under FitFast/, ready to pull with gs.</div>`; return; }
   let html = "";
@@ -314,12 +317,18 @@ async function loadFitFast() {
     if (g.folder) facts.push("→ " + g.folder);
     const canPause = ["queued", "scraping", "downloading"].includes(g.state);
     const arch = ["done", "failed"].includes(g.state) && g.folder ? archLabel(g.folder) : null;
+    // Extracted files: what's beside the archives, or the whole folder once they're gone.
+    const ex = g.folder ? archExact(g.folder) : null;
+    const canGet = g.state === "done" && g.extract && g.folder && (!ex || ex.extracted > 0);
+    const canDropEx = ["done", "failed"].includes(g.state) && ex && ex.extracted > 0;
     html += `<div class="card"><div class="card-head">
         <span class="name">${esc(g.title || "Untitled")}</span>
         <span class="badge ${gameClass[g.state] || "s-muted"}">${esc(g.state)}</span>
         ${canPause ? `<button class="small" data-act="pause" data-id="${g.id}">Pause</button>` : ""}
         ${g.state === "paused" ? `<button class="small" data-act="resume" data-id="${g.id}">Resume</button>` : ""}
         ${(c.failed || c.error || g.state === "failed") ? `<button class="small" data-act="retry" data-id="${g.id}">Retry</button>` : ""}
+        ${canGet ? `<button class="small" data-zipx="${esc(g.folder)}">Download extracted (.zip${ex ? ", " + bytes(ex.extracted) : ""})</button>` : ""}
+        ${canDropEx ? `<button class="small danger" data-xdel="${esc(g.folder)}">Delete extracted files (${bytes(ex.extracted)})</button>` : ""}
         ${arch ? `<button class="small danger" data-arch="${esc(g.folder)}">Delete .rar archives (${bytes(arch.size)})</button>` : ""}
         <button class="small" data-act="remove" data-id="${g.id}">Remove</button>
       </div>
@@ -400,6 +409,11 @@ let storage = null;
 async function loadStorage(fresh) {
   try { storage = await api("GET", "/api/storage" + (fresh ? "?fresh=1" : "")); }
   catch (e) { $("st-body").innerHTML = `<div class="msg err">Couldn't read storage: ${esc(e.message)}</div>`; return; }
+  renderStorage();
+}
+// Separate from loading, so FitFast can redraw it once it knows which games are extracted.
+function renderStorage() {
+  if (!storage) return;
   const s = storage, other = Math.max(0, s.used - s.share), pct = n => s.total ? (100 * n / s.total).toFixed(2) + "%" : "0";
   const top = s.folders.slice(0, 8), max = top.length ? top[0].size || 1 : 1;
   $("st-body").className = "";
@@ -419,7 +433,8 @@ async function loadStorage(fresh) {
     ${s.archives.length ? `<h3>Leftover .rar archives · ${bytes(s.archives.reduce((n, a) => n + a.size, 0))}</h3>
       <div class="meta">What a game leaves behind once it's extracted. Deleting removes only the .rar volumes.</div>
       <table class="list">${s.archives.map(a => `<tr>
-        <td class="name"><a class="dir" data-go="${esc(a.name)}">${esc(a.name || "share")}</a>${archExtracted([a]) ? ` <span class="badge s-ok">extracted</span>` : ""}</td>
+        <td class="name"><a class="dir" data-go="${esc(a.name)}">${esc(a.name || "share")}</a>${archExtracted([a]) ? ` <span class="badge s-ok">extracted</span>` : ""}
+          <div class="facts">${a.extracted ? `${bytes(a.extracted)} of extracted files beside them` : "nothing extracted beside them"}</div></td>
         <td class="num opt">${a.files} file${a.files === 1 ? "" : "s"}</td><td class="num">${bytes(a.size)}</td>
         <td class="act"><button class="small danger" data-arch="${esc(a.name)}">Delete</button></td></tr>`).join("")}</table>` : ""}
     <div class="meta" style="margin-top:8px;overflow-wrap:anywhere">Sharing <code>${esc(s.root)}</code></div>`;
@@ -428,8 +443,10 @@ async function loadStorage(fresh) {
 // ── archive cleanup ──────────────────────────────────────────────────────────
 let ffGames = [];
 const archUnder = dir => (storage ? storage.archives : []).filter(a => !dir || a.name === dir || a.name.startsWith(dir + "/"));
-// True when every archive folder belongs to a game FitFast has finished extracting.
-const archExtracted = groups => groups.length > 0 && groups.every(a =>
+const archExact = dir => (storage ? storage.archives : []).find(a => a.name === dir) || null;
+// True when every archive folder belongs to a game FitFast has finished extracting,
+// and the extracted files are still there beside it.
+const archExtracted = groups => groups.length > 0 && groups.every(a => a.extracted > 0 &&
   ffGames.some(g => g.folder === a.name && g.state === "done" && /^Extracted \d+ set/.test(g.message || "")));
 function archLabel(dir) {
   const groups = archUnder(dir);
@@ -443,12 +460,35 @@ document.addEventListener("click", async e => {
   if (!info) { say("No .rar archives left there."); return; }
   const sub = info.groups.some(a => a.name !== dir);
   if (!confirm(`Delete ${info.n} .rar archive file${info.n === 1 ? "" : "s"} (${bytes(info.size)}) in ${dir ? `"${dir}"` : "the whole share"}${sub ? ", including subfolders" : ""}?\n\n` +
-    (info.extracted ? "FitFast extracted them, so they aren't needed any more." : "FitFast didn't extract these, so only go ahead if they're already extracted.") +
+    (info.extracted ? "FitFast extracted them and the extracted files are still there, so they aren't needed any more."
+      : "Nothing here shows them as extracted (the extracted files may be gone), so only go ahead if you don't need the game from them.") +
     "\nOnly .rar volumes are removed; everything else stays. This can't be undone.")) return;
   b.disabled = true;
   try {
     const r = await api("POST", "/api/archives/delete?path=" + enc(dir));
     say(`Deleted ${r.deleted} archive file${r.deleted === 1 ? "" : "s"} and freed ${bytes(r.freed)}.` +
+      (r.failed.length ? "\nCouldn't delete:\n" + r.failed.join("\n") : ""), r.failed.length > 0);
+  } catch (err) { say(err.message, true); }
+  b.disabled = false;
+  await loadStorage(true);
+  loadFiles(true); loadFitFast();
+});
+
+// Extracted files: everything beside a folder's .rar volumes except the download
+// itself (volumes, aria2 resume files, FitFast's dotfiles).
+const sayFor = b => { const s = b.closest("section"); return s && s.id === "files" ? flMsg : s && s.id === "fitfast" ? ffMsg : banner; };
+document.addEventListener("click", async e => {
+  const z = e.target.closest("button[data-zipx]");
+  if (z && !z.hidden) { downloadZip(z.dataset.zipx, true, sayFor(z)); return; }
+  const b = e.target.closest("button[data-xdel]"); if (!b || b.hidden) return;
+  const dir = b.dataset.xdel, ex = archExact(dir), say = sayFor(b);
+  if (!ex || !ex.extracted) { say("No extracted files beside the archives there."); return; }
+  if (!confirm(`Delete the extracted files in "${dir}": ${ex.extractedFiles} file${ex.extractedFiles === 1 ? "" : "s"}, ${bytes(ex.extracted)}?\n\n` +
+    `The download stays: ${ex.files} .rar archive${ex.files === 1 ? "" : "s"} (${bytes(ex.size)}) and FitFast's own state. This can't be undone.`)) return;
+  b.disabled = true;
+  try {
+    const r = await api("POST", "/api/extracted/delete?path=" + enc(dir));
+    say(`Deleted ${r.deleted} extracted file${r.deleted === 1 ? "" : "s"} and freed ${bytes(r.freed)}. The .rar archives are still there.` +
       (r.failed.length ? "\nCouldn't delete:\n" + r.failed.join("\n") : ""), r.failed.length > 0);
   } catch (err) { say(err.message, true); }
   b.disabled = false;
@@ -504,6 +544,13 @@ async function loadFiles(force) {
   const arch = archLabel(p), ab = $("fl-arch");
   ab.hidden = !arch; ab.dataset.arch = p;
   if (arch) ab.textContent = `Delete .rar archives here (${arch.n} · ${bytes(arch.size)})`;
+  const ex = archExact(p), withEx = !!(p && ex && ex.extracted > 0);
+  $("fl-xdl").hidden = $("fl-xdel").hidden = !withEx;
+  $("fl-xdl").dataset.zipx = $("fl-xdel").dataset.xdel = p;
+  if (withEx) {
+    $("fl-xdl").textContent = `Download extracted files (.zip · ${bytes(ex.extracted)})`;
+    $("fl-xdel").textContent = `Delete extracted files (${ex.extractedFiles} · ${bytes(ex.extracted)})`;
+  }
   $("fl-zip").textContent = p ? "Download this folder (.zip)" : "Download everything (.zip)";
   let d;
   try { d = await api("GET", "/api/list?path=" + enc(p)); }
@@ -581,15 +628,15 @@ async function walkEntry(entry, prefix, out) {
   }
 }
 
-async function downloadZip(p) {
-  const url = "/zip?path=" + enc(p);
+async function downloadZip(p, extractedOnly, say = flMsg) {
+  const url = "/zip?path=" + enc(p) + (extractedOnly ? "&skip=archives" : "");
   try {
     const r = await fetch(url, { method: "HEAD" });
-    if (!r.ok) { flMsg(r.status === 409 ? "FitFast is still downloading or extracting in there; wait until it's done." : `Can't download that folder (HTTP ${r.status}).`, true); return; }
-  } catch (err) { flMsg(err.message, true); return; }
+    if (!r.ok) { say(r.status === 409 ? "FitFast is still downloading or extracting in there; wait until it's done." : `Can't download that folder (HTTP ${r.status}).`, true); return; }
+  } catch (err) { say(err.message, true); return; }
   const a = document.createElement("a");
   a.href = url; a.download = ""; document.body.appendChild(a); a.click(); a.remove();
-  flMsg(`Downloading ${p || "the whole share"} as a .zip. The browser can't show its size up front; Transfers above shows the progress.`);
+  say(`Downloading ${extractedOnly ? "the extracted files of " : ""}${p || "the whole share"} as a .zip. The browser can't show its size up front; Transfers at the top shows the progress.`);
 }
 
 let uploading = false;
@@ -644,7 +691,8 @@ function putSlice(url, blob, progress) {
 
 // ── polling ──────────────────────────────────────────────────────────────────
 async function loop() {
-  await Promise.all([loadServices(), loadFitFast(), loadTransfers(), loadStorage().then(() => loadFiles())]);
+  // Storage first: the FitFast cards and the Files toolbar offer actions from it.
+  await Promise.all([loadServices(), loadTransfers(), loadStorage().then(() => Promise.all([loadFiles(), loadFitFast()]))]);
   setTimeout(loop, ffBusy || openLogs.size || trActive || uploading ? 1000 : 5000);
 }
 loop();

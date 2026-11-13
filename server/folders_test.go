@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -140,4 +141,97 @@ func TestDeleteArchives(t *testing.T) {
 	if c := archivesReq(".uploads").Code; c != http.StatusBadRequest {
 		t.Errorf(".uploads: got %d, want 400", c)
 	}
+}
+
+// A finished game: the download (volumes, an aria2 resume file, FitFast's state)
+// beside what was extracted from it.
+func gameFolder(t *testing.T) string {
+	t.Helper()
+	root = t.TempDir()
+	partDir = filepath.Join(root, ".uploads")
+	os.MkdirAll(partDir, 0o755)
+	g := filepath.Join(root, "FitFast", "Game")
+	os.MkdirAll(filepath.Join(g, "MD5"), 0o755)
+	os.MkdirAll(filepath.Join(g, "Redist", "deep"), 0o755)
+	for name, n := range map[string]int{
+		"Game.part001.rar": 100, "Game.part002.rar": 100, "Game.part002.rar.aria2": 3, ".fitfast.json": 2,
+		"setup.exe": 10, "fg-01.bin": 50, "MD5/fitgirl-bins.md5": 4, "Redist/deep/vc.exe": 6,
+	} {
+		os.WriteFile(filepath.Join(g, name), make([]byte, n), 0o644)
+	}
+	return g
+}
+
+func zipNames(t *testing.T, w *httptest.ResponseRecorder) []string {
+	t.Helper()
+	body := w.Body.Bytes()
+	zr, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
+	if err != nil {
+		t.Fatalf("%d %s: %v", w.Code, body, err)
+	}
+	var names []string
+	for _, f := range zr.File {
+		if !strings.HasSuffix(f.Name, "/") {
+			names = append(names, f.Name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+func TestExtracted(t *testing.T) {
+	g := gameFolder(t)
+
+	storageCache = nil
+	sw := httptest.NewRecorder()
+	handleStorage(sw, httptest.NewRequest(http.MethodGet, "/api/storage", nil))
+	var v storageView
+	json.Unmarshal(sw.Body.Bytes(), &v)
+	if len(v.Archives) != 1 || v.Archives[0].Files != 2 || v.Archives[0].Size != 200 ||
+		v.Archives[0].ExtractedFiles != 4 || v.Archives[0].Extracted != 70 {
+		t.Errorf("storage archives %+v", v.Archives)
+	}
+
+	w := httptest.NewRecorder()
+	handleZip(w, httptest.NewRequest(http.MethodGet, "/zip?path=FitFast/Game&skip=archives", nil))
+	want := "Game/MD5/fitgirl-bins.md5|Game/Redist/deep/vc.exe|Game/fg-01.bin|Game/setup.exe"
+	if got := strings.Join(zipNames(t, w), "|"); got != want {
+		t.Errorf("extracted zip has %s, want %s", got, want)
+	}
+	if got := len(zipNames(t, zipReq("FitFast/Game"))); got != 7 {
+		t.Errorf("full zip has %d files, want 7", got)
+	}
+
+	for _, p := range []string{"", "FitFast", "FitFast/Game/MD5", "FitFast/Game/setup.exe", ".uploads"} {
+		if c := extractedReq(p).Code; c == http.StatusOK {
+			t.Errorf("%q: allowed, should be refused", p)
+		}
+	}
+	r := extractedReq("FitFast/Game")
+	var out struct {
+		Deleted int
+		Freed   int64
+	}
+	json.Unmarshal(r.Body.Bytes(), &out)
+	if r.Code != http.StatusOK || out.Deleted != 4 || out.Freed != 70 {
+		t.Fatalf("delete extracted: %d %s", r.Code, r.Body)
+	}
+	var left []string
+	filepath.WalkDir(g, func(p string, d fs.DirEntry, _ error) error {
+		if p != g {
+			rel, _ := filepath.Rel(g, p)
+			left = append(left, rel)
+		}
+		return nil
+	})
+	sort.Strings(left)
+	if got := strings.Join(left, "|"); got != ".fitfast.json|Game.part001.rar|Game.part002.rar|Game.part002.rar.aria2" {
+		t.Errorf("left behind: %s", got)
+	}
+}
+
+func extractedReq(p string) *httptest.ResponseRecorder {
+	w := httptest.NewRecorder()
+	handleDeleteExtracted(w, httptest.NewRequest(http.MethodPost, "/api/extracted/delete?path="+url.QueryEscape(p), nil))
+	return w
 }
