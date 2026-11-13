@@ -80,9 +80,12 @@ Without the UI: `gs -get game/folder` and `gs -put /path -into game`.
 
 The server serves a page at `http://<server>:8080/` that brings everything together:
 
-- **Storage**: free and total space on the shared folder's disk, what the share uses, its largest folders, and unfinished uploads kept for resuming (`GET /api/storage`).
+- **Storage**: free and total space on the shared folder's disk, what the share uses, its largest folders, unfinished uploads kept for resuming, and the folders still holding `.rar` archives (`GET /api/storage`).
 - **Transfers**: every upload and download moving through the server right now, with progress, speed, ETA and the client's address (`GET /api/transfers`). gs's queue lives on the WSL machine, so items waiting there show up once they start.
-- **Files**: browse the share, download single files, delete, and upload files or whole folders. Browser uploads use the same resumable protocol as gs, so picking a file again after a drop carries on where it stopped. The address bar keeps the folder (`/#/Game/sub`).
+- **Files**: browse the share, download files or whole folders, delete, and upload files or folders (with the buttons, or by dropping them on the box). The address bar keeps the folder (`/#/Game/sub`).
+  - Browser uploads use the same resumable protocol as gs, so uploading a file again after a drop carries on where it stopped. Names starting with a dot are skipped.
+  - A folder downloads as a `.zip` built on the fly (`GET /zip?path=`), with files stored rather than compressed, so it runs at network speed. It can't resume after a drop, so gs is safer for a big game over a shaky link.
+- **Deleting `.rar` archives**: once a game is extracted its RAR volumes are dead weight the size of the game. **Delete** next to a folder in Storage, **Delete .rar archives here** in Files, or the button on a finished FitFast game removes only the `.rar` / `.rNN` volumes under that folder (`POST /api/archives/delete?path=`). Games FitFast extracted are marked as such. The server refuses while FitFast is still downloading or extracting there.
 - **Services**: what's running, its health, PID, uptime and restarts, its log, and a **Restart** button.
 - **Pull & reconcile**: the same update as `U` in gs (see CD mode), with what changed.
 - **FitFast downloads**: paste a `fitgirl-repacks.site` page or `fuckingfast.co` links and press **Download on server**. The game downloads on the server into `FitFast/<Game>/` in the shared folder, then extracts. Pull it to WSL with gs once it's done. **Get links only** gives you the signed links for another downloader instead. Downloads resume across server restarts.

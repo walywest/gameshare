@@ -206,6 +206,18 @@ func TestDeleteRefusesBusyServicePaths(t *testing.T) {
 			t.Errorf("%s: got %d, want 409", p, c)
 		}
 	}
+	// A folder still downloading can't be zipped half-done or have its archives cleared.
+	for _, p := range []string{"FitFast/Game", "FitFast"} {
+		if c := zipReq(p).Code; c != http.StatusConflict {
+			t.Errorf("zip %s: got %d, want 409", p, c)
+		}
+		if c := archivesReq(p).Code; c != http.StatusConflict {
+			t.Errorf("archives %s: got %d, want 409", p, c)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, "FitFast", "Game", "a.rar")); err != nil {
+		t.Error("a busy folder's archive was deleted")
+	}
 	if c := deleteReq("FitFast/Other"); c != http.StatusOK {
 		t.Errorf("unrelated folder: got %d", c)
 	}

@@ -11,6 +11,8 @@ server/            Go server (port 8080): file API, CD updates, service supervis
   main.go          file API (list/tree/upload/delete/dl/speed), startup, signals
   update.go        CD: POST /api/update -> git pull, then rebuild+exit 75 or reconcile services
   services.go      the reconciler: homelab.json -> running processes, /svc/<name>/ proxy
+  storage.go       GET /api/storage (disk, folder sizes, .rar folders) and /api/transfers (live, read from file offsets)
+  folders.go       GET /zip (folder as a stored zip, streamed) and POST /api/archives/delete (RAR volumes only)
   web.go, web/     the homelab page (single embedded index.html, vanilla JS, no CDN)
   preflight.go     disk/NIC checks printed at startup
 client/            gs: Bubble Tea TUI for transfers (runs in WSL). Its only homelab link is `U` (update)
@@ -113,9 +115,10 @@ go build -C server -o /tmp/hl-server . && GAMESHARE_REPO=$PWD /tmp/hl-server 180
 
 That's how the first homelab rollout was verified (2026-11-10).
 
-## Status (2026-11-11)
+## Status (2026-11-13)
 
-- `main` holds all of the above. It's **not pushed yet**: the box still runs `9fc18a8`, the pre-homelab game-share. Deploying it means `git push origin main`, then `U` in gs. The rehearsal shows that brings everything up with no manual steps.
-- Never tested end to end: a real FitGirl download through the page. The engine is covered only with fakes.
+- The box runs the homelab from `main`. Deploys so far were `git push origin main`, then `POST /api/update` (same as `U` in gs); each came back on its own with FitFast healthy.
+- A real FitGirl download (HITMAN WoA, 120 parts) has gone through the page end to end, including extraction. Tests still use only the fakes (rule 3).
+- Transfer tracking must never sit on the copy path: `/dl` relies on sendfile, so progress is read from the file offset, not by wrapping the writer.
 - Unknown about the box: whether it's NixOS. If it is, the Camoufox fallback needs `programs.nix-ld.enable = true`.
 - Ideas that weren't asked for: a gs FitFast pane (the owner chose the page instead), and auth for any internet exposure (the owner said LAN only "for now").

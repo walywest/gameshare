@@ -290,6 +290,25 @@ func putUpload(w http.ResponseWriter, r *http.Request, u *upload) {
 	writeJSON(w, map[string]any{"ok": true})
 }
 
+// serviceBusy returns the busy path of a service that target overlaps (the same
+// path, inside it, or containing it), or "" when none does.
+func serviceBusy(target string) string {
+	if sup == nil {
+		return ""
+	}
+	sep := string(filepath.Separator)
+	for _, p := range sup.busyPaths() {
+		busy, err := resolve(p)
+		if err != nil || busy == root {
+			continue
+		}
+		if busy == target || strings.HasPrefix(busy, target+sep) || strings.HasPrefix(target, busy+sep) {
+			return p
+		}
+	}
+	return ""
+}
+
 // handleDelete removes a file or a whole folder. It refuses the served root, and
 // anything an upload is still writing into, since the upload would just recreate it.
 func handleDelete(w http.ResponseWriter, r *http.Request) {
@@ -306,18 +325,9 @@ func handleDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	if sup != nil {
-		for _, p := range sup.busyPaths() {
-			busy, err := resolve(p)
-			if err != nil || busy == root {
-				continue
-			}
-			sep := string(filepath.Separator)
-			if busy == target || strings.HasPrefix(busy, target+sep) || strings.HasPrefix(target, busy+sep) {
-				http.Error(w, "a service is still downloading into "+p, http.StatusConflict)
-				return
-			}
-		}
+	if p := serviceBusy(target); p != "" {
+		http.Error(w, "a service is still downloading into "+p, http.StatusConflict)
+		return
 	}
 	uploadsMu.Lock()
 	defer uploadsMu.Unlock() // held so no upload can start into it meanwhile
@@ -479,6 +489,8 @@ func main() {
 	mux.HandleFunc("/api/speed/disk", handleSpeedDisk)
 	mux.HandleFunc("GET /api/storage", handleStorage)
 	mux.HandleFunc("GET /api/transfers", handleTransfers)
+	mux.HandleFunc("GET /zip", handleZip)
+	mux.HandleFunc("POST /api/archives/delete", handleDeleteArchives)
 	mux.HandleFunc("/api/version", func(w http.ResponseWriter, _ *http.Request) {
 		v := map[string]any{"commit": runningCommit, "cd": cdRepo != "", "started": started.Format(time.RFC3339)}
 		if sup != nil {

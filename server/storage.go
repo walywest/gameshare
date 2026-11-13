@@ -105,6 +105,7 @@ type storageView struct {
 	Folders  []folderUse `json:"folders"`  // top level of the share, largest first
 	Partials int64       `json:"partials"` // unfinished uploads, kept for resuming
 	PartN    int         `json:"partN"`
+	Archives []folderUse `json:"archives"` // folders holding RAR volumes, by folder path
 	Scanned  time.Time   `json:"scanned"`
 }
 
@@ -127,14 +128,15 @@ func (v *storageView) diskUse() {
 }
 
 func scanStorage() *storageView {
-	v := &storageView{Root: root, Folders: []folderUse{}, Scanned: time.Now()}
+	v := &storageView{Root: root, Folders: []folderUse{}, Archives: []folderUse{}, Scanned: time.Now()}
+	archives := map[string]*folderUse{}
 	items, _ := os.ReadDir(root)
 	for _, it := range items {
 		if strings.HasPrefix(it.Name(), ".") {
 			continue
 		}
 		f := folderUse{Name: it.Name(), Dir: it.IsDir()}
-		filepath.WalkDir(filepath.Join(root, it.Name()), func(_ string, d fs.DirEntry, err error) error {
+		filepath.WalkDir(filepath.Join(root, it.Name()), func(p string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return nil // unreadable bits are skipped, not fatal
 			}
@@ -147,6 +149,19 @@ func scanStorage() *storageView {
 			if info, err := d.Info(); err == nil && d.Type().IsRegular() {
 				f.Size += info.Size()
 				f.Files++
+				if isArchive(d.Name()) && !strings.HasPrefix(d.Name(), ".") {
+					dir := shareRel(filepath.Dir(p))
+					if dir == "." {
+						dir = ""
+					}
+					a := archives[dir]
+					if a == nil {
+						a = &folderUse{Name: dir, Dir: true}
+						archives[dir] = a
+					}
+					a.Size += info.Size()
+					a.Files++
+				}
 			}
 			return nil
 		})
@@ -154,6 +169,10 @@ func scanStorage() *storageView {
 		v.Folders = append(v.Folders, f)
 	}
 	sort.Slice(v.Folders, func(a, b int) bool { return v.Folders[a].Size > v.Folders[b].Size })
+	for _, a := range archives {
+		v.Archives = append(v.Archives, *a)
+	}
+	sort.Slice(v.Archives, func(a, b int) bool { return v.Archives[a].Size > v.Archives[b].Size })
 	if parts, err := os.ReadDir(partDir); err == nil {
 		for _, p := range parts {
 			if info, err := p.Info(); err == nil && strings.HasSuffix(p.Name(), ".part") {

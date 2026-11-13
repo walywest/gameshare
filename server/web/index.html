@@ -75,6 +75,9 @@ a.btn { display: inline-block; font-size: 13px; padding: 3px 9px; border-radius:
 .crumbs { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; font-size: 14px; flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .crumbs .sep { color: var(--muted); }
 .icon { display: inline-block; width: 1.4em; color: var(--muted); }
+button.danger { color: var(--bad); border-color: var(--bad); }
+section.drop { outline: 2px dashed var(--accent); outline-offset: -6px; }
+h3 { font-size: 14px; margin: 16px 0 0; }
 @media (max-width: 560px) { table.list .opt { display: none; } }
 </style>
 </head>
@@ -100,17 +103,20 @@ a.btn { display: inline-block; font-size: 13px; padding: 3px 9px; border-radius:
 
   <section id="files">
     <h2>Files</h2>
-    <div class="row" style="margin-top:0">
-      <div class="crumbs" id="fl-crumbs"></div>
+    <div class="crumbs" id="fl-crumbs"></div>
+    <div class="row">
       <button class="small" id="fl-up-files">Upload files</button>
       <button class="small" id="fl-up-dir">Upload folder</button>
+      <button class="small" id="fl-zip">Download this folder (.zip)</button>
+      <button class="small danger" id="fl-arch" data-arch="" hidden></button>
       <input type="file" id="fl-pick-files" multiple hidden>
       <input type="file" id="fl-pick-dir" webkitdirectory multiple hidden>
     </div>
     <div class="msg" id="fl-msg"></div>
     <div id="fl-uploads"></div>
     <div id="fl-body"></div>
-    <div class="meta" style="margin-top:8px">Downloads here are single files. For whole folders and transfers that resume after a drop, use gs.</div>
+    <div class="meta" style="margin-top:8px">Drop files or folders anywhere on this box to upload them here. Uploads resume if you pick the same files again after a drop.
+      Folders download as a .zip built on the fly, which can't resume; for big games over a shaky link, gs is safer.</div>
   </section>
 
   <section>
@@ -292,6 +298,7 @@ async function loadFitFast() {
   if (!limitTouched) $("ff-limit").value = d.limit_mbps || 0;
   $("ff-speed").textContent = d.speed ? "Now " + bytes(d.speed) + "/s" : "";
   ffBusy = d.games.some(g => ["downloading", "scraping", "extracting"].includes(g.state));
+  ffGames = d.games;
 
   if (!d.games.length) { $("ff-games").innerHTML = `<div class="empty" style="margin-top:10px">No downloads yet. Finished games land in the shared folder under FitFast/, ready to pull with gs.</div>`; return; }
   let html = "";
@@ -306,12 +313,14 @@ async function loadFitFast() {
     if (c.failed) facts.push(c.failed + " failed");
     if (g.folder) facts.push("→ " + g.folder);
     const canPause = ["queued", "scraping", "downloading"].includes(g.state);
+    const arch = ["done", "failed"].includes(g.state) && g.folder ? archLabel(g.folder) : null;
     html += `<div class="card"><div class="card-head">
         <span class="name">${esc(g.title || "Untitled")}</span>
         <span class="badge ${gameClass[g.state] || "s-muted"}">${esc(g.state)}</span>
         ${canPause ? `<button class="small" data-act="pause" data-id="${g.id}">Pause</button>` : ""}
         ${g.state === "paused" ? `<button class="small" data-act="resume" data-id="${g.id}">Resume</button>` : ""}
         ${(c.failed || c.error || g.state === "failed") ? `<button class="small" data-act="retry" data-id="${g.id}">Retry</button>` : ""}
+        ${arch ? `<button class="small danger" data-arch="${esc(g.folder)}">Delete .rar archives (${bytes(arch.size)})</button>` : ""}
         <button class="small" data-act="remove" data-id="${g.id}">Remove</button>
       </div>
       <div class="bar"><div style="width:${(frac * 100).toFixed(1)}%"></div></div>
@@ -407,8 +416,45 @@ async function loadStorage(fresh) {
       <tr><td class="name">${f.dir ? `<a class="dir" data-go="${esc(f.name)}">${esc(f.name)}</a>` : esc(f.name)}
         <div class="minibar"><div style="width:${(100 * f.size / max).toFixed(1)}%"></div></div></td>
         <td class="num opt">${f.files}</td><td class="num">${bytes(f.size)}</td></tr>`).join("")}</table>` : ""}
+    ${s.archives.length ? `<h3>Leftover .rar archives · ${bytes(s.archives.reduce((n, a) => n + a.size, 0))}</h3>
+      <div class="meta">What a game leaves behind once it's extracted. Deleting removes only the .rar volumes.</div>
+      <table class="list">${s.archives.map(a => `<tr>
+        <td class="name"><a class="dir" data-go="${esc(a.name)}">${esc(a.name || "share")}</a>${archExtracted([a]) ? ` <span class="badge s-ok">extracted</span>` : ""}</td>
+        <td class="num opt">${a.files} file${a.files === 1 ? "" : "s"}</td><td class="num">${bytes(a.size)}</td>
+        <td class="act"><button class="small danger" data-arch="${esc(a.name)}">Delete</button></td></tr>`).join("")}</table>` : ""}
     <div class="meta" style="margin-top:8px;overflow-wrap:anywhere">Sharing <code>${esc(s.root)}</code></div>`;
 }
+
+// ── archive cleanup ──────────────────────────────────────────────────────────
+let ffGames = [];
+const archUnder = dir => (storage ? storage.archives : []).filter(a => !dir || a.name === dir || a.name.startsWith(dir + "/"));
+// True when every archive folder belongs to a game FitFast has finished extracting.
+const archExtracted = groups => groups.length > 0 && groups.every(a =>
+  ffGames.some(g => g.folder === a.name && g.state === "done" && /^Extracted \d+ set/.test(g.message || "")));
+function archLabel(dir) {
+  const groups = archUnder(dir);
+  if (!groups.length) return null;
+  return { groups, n: groups.reduce((s, a) => s + a.files, 0), size: groups.reduce((s, a) => s + a.size, 0), extracted: archExtracted(groups) };
+}
+document.addEventListener("click", async e => {
+  const b = e.target.closest("button[data-arch]"); if (!b || b.hidden) return;
+  const dir = b.dataset.arch, info = archLabel(dir), sec = b.closest("section");
+  const say = sec && sec.id === "files" ? flMsg : sec && sec.id === "fitfast" ? ffMsg : banner;
+  if (!info) { say("No .rar archives left there."); return; }
+  const sub = info.groups.some(a => a.name !== dir);
+  if (!confirm(`Delete ${info.n} .rar archive file${info.n === 1 ? "" : "s"} (${bytes(info.size)}) in ${dir ? `"${dir}"` : "the whole share"}${sub ? ", including subfolders" : ""}?\n\n` +
+    (info.extracted ? "FitFast extracted them, so they aren't needed any more." : "FitFast didn't extract these, so only go ahead if they're already extracted.") +
+    "\nOnly .rar volumes are removed; everything else stays. This can't be undone.")) return;
+  b.disabled = true;
+  try {
+    const r = await api("POST", "/api/archives/delete?path=" + enc(dir));
+    say(`Deleted ${r.deleted} archive file${r.deleted === 1 ? "" : "s"} and freed ${bytes(r.freed)}.` +
+      (r.failed.length ? "\nCouldn't delete:\n" + r.failed.join("\n") : ""), r.failed.length > 0);
+  } catch (err) { say(err.message, true); }
+  b.disabled = false;
+  await loadStorage(true);
+  loadFiles(true); loadFitFast();
+});
 $("st-body").addEventListener("click", e => { const a = e.target.closest("[data-go]"); if (a) go(a.dataset.go); });
 
 // ── transfers ────────────────────────────────────────────────────────────────
@@ -455,6 +501,10 @@ async function loadFiles(force) {
   const parts = p ? p.split("/") : [];
   $("fl-crumbs").innerHTML = `<a class="crumb" data-go="">share</a>` +
     parts.map((s, i) => `<span class="sep">/</span><a class="crumb" data-go="${esc(parts.slice(0, i + 1).join("/"))}">${esc(s)}</a>`).join("");
+  const arch = archLabel(p), ab = $("fl-arch");
+  ab.hidden = !arch; ab.dataset.arch = p;
+  if (arch) ab.textContent = `Delete .rar archives here (${arch.n} · ${bytes(arch.size)})`;
+  $("fl-zip").textContent = p ? "Download this folder (.zip)" : "Download everything (.zip)";
   let d;
   try { d = await api("GET", "/api/list?path=" + enc(p)); }
   catch (e) { $("fl-body").innerHTML = `<div class="msg err">${esc(e.message)}</div>`; flKey = ""; return; }
@@ -471,12 +521,13 @@ async function loadFiles(force) {
       return `<tr><td class="name"><span class="icon">${f.dir ? "▸" : "·"}</span>${f.dir ? `<a class="dir" data-go="${esc(rel)}">${esc(f.name)}</a>` : esc(f.name)}</td>
         <td class="num opt">${f.mtime ? new Date(f.mtime).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : ""}</td>
         <td class="num">${size}</td>
-        <td class="act">${f.dir ? "" : `<a class="btn" href="/dl?path=${enc(rel)}" download>Download</a> `}<button class="small" data-del="${esc(rel)}" data-dir="${f.dir ? 1 : ""}">Delete</button></td></tr>`;
+        <td class="act">${f.dir ? `<button class="small" data-zip="${esc(rel)}" title="Downloads the folder as a .zip">Download</button> ` : `<a class="btn" href="/dl?path=${enc(rel)}" download>Download</a> `}<button class="small" data-del="${esc(rel)}" data-dir="${f.dir ? 1 : ""}">Delete</button></td></tr>`;
     }).join("")}</table>`;
 }
 window.addEventListener("hashchange", () => { flMsg(""); loadFiles(true); });
 $("files").addEventListener("click", async e => {
   const a = e.target.closest("[data-go]"); if (a) { e.preventDefault(); go(a.dataset.go); return; }
+  const z = e.target.closest("button[data-zip]"); if (z) { downloadZip(z.dataset.zip); return; }
   const b = e.target.closest("button[data-del]"); if (!b) return;
   const p = b.dataset.del;
   if (!confirm(`Delete ${b.dataset.dir ? "the folder " : ""}"${p}"${b.dataset.dir ? " and everything in it" : ""} from the server? This can't be undone.`)) return;
@@ -491,32 +542,86 @@ $("files").addEventListener("click", async e => {
 $("fl-up-files").onclick = () => $("fl-pick-files").click();
 $("fl-up-dir").onclick = () => $("fl-pick-dir").click();
 for (const id of ["fl-pick-files", "fl-pick-dir"]) $(id).addEventListener("change", e => {
-  const files = [...e.target.files]; e.target.value = "";
-  if (files.length) uploadAll(curPath(), files);
+  const items = [...e.target.files].map(f => ({ file: f, rel: f.webkitRelativePath || f.name })); e.target.value = "";
+  if (items.length) uploadAll(curPath(), items);
 });
+
+// Drag and drop: files and whole folders, walked with the entries API.
+const filesSec = $("files");
+let dragDepth = 0;
+const hasFiles = e => e.dataTransfer && [...e.dataTransfer.types].includes("Files");
+filesSec.addEventListener("dragenter", e => { if (!hasFiles(e)) return; e.preventDefault(); dragDepth++; filesSec.classList.add("drop"); });
+filesSec.addEventListener("dragover", e => { if (hasFiles(e)) { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; } });
+filesSec.addEventListener("dragleave", () => { if (--dragDepth <= 0) { dragDepth = 0; filesSec.classList.remove("drop"); } });
+filesSec.addEventListener("drop", async e => {
+  if (!hasFiles(e)) return;
+  e.preventDefault(); dragDepth = 0; filesSec.classList.remove("drop");
+  // Entries must be taken now: the drop's data is gone after the first await.
+  const entries = [...e.dataTransfer.items].map(i => i.webkitGetAsEntry && i.webkitGetAsEntry()).filter(Boolean);
+  const loose = [...e.dataTransfer.files], dir = curPath();
+  let items = [];
+  if (entries.length) {
+    flMsg("Reading what you dropped…");
+    try { for (const en of entries) await walkEntry(en, "", items); }
+    catch (err) { flMsg("Couldn't read what you dropped: " + err.message, true); return; }
+  } else items = loose.map(f => ({ file: f, rel: f.name }));
+  if (items.length) uploadAll(dir, items); else flMsg("Nothing to upload: the drop had no files in it.", true);
+});
+// Dropping just outside the box shouldn't make the browser open the file instead.
+window.addEventListener("dragover", e => e.preventDefault());
+window.addEventListener("drop", e => e.preventDefault());
+async function walkEntry(entry, prefix, out) {
+  if (entry.isFile) { out.push({ file: await new Promise((res, rej) => entry.file(res, rej)), rel: prefix + entry.name }); return; }
+  if (!entry.isDirectory) return;
+  const reader = entry.createReader();
+  for (;;) { // readEntries hands them out in batches until an empty one
+    const batch = await new Promise((res, rej) => reader.readEntries(res, rej));
+    if (!batch.length) return;
+    for (const child of batch) await walkEntry(child, prefix + entry.name + "/", out);
+  }
+}
+
+async function downloadZip(p) {
+  const url = "/zip?path=" + enc(p);
+  try {
+    const r = await fetch(url, { method: "HEAD" });
+    if (!r.ok) { flMsg(r.status === 409 ? "FitFast is still downloading or extracting in there; wait until it's done." : `Can't download that folder (HTTP ${r.status}).`, true); return; }
+  } catch (err) { flMsg(err.message, true); return; }
+  const a = document.createElement("a");
+  a.href = url; a.download = ""; document.body.appendChild(a); a.click(); a.remove();
+  flMsg(`Downloading ${p || "the whole share"} as a .zip. The browser can't show its size up front; Transfers above shows the progress.`);
+}
+
 let uploading = false;
-async function uploadAll(dir, files) {
+async function uploadAll(dir, items) {
   if (uploading) { flMsg("An upload is already running; wait for it to finish.", true); return; }
+  // The server refuses names starting with a dot, so they're left out up front.
+  const hidden = items.filter(i => i.rel.split("/").some(s => s.startsWith(".")));
+  items = items.filter(i => !hidden.includes(i));
+  const skipped = hidden.length ? `\nSkipped ${hidden.length} hidden file${hidden.length === 1 ? "" : "s"} (names starting with a dot).` : "";
+  if (!items.length) { flMsg("Nothing to upload." + skipped, true); return; }
   uploading = true; flMsg("");
-  const total = files.reduce((n, f) => n + f.size, 0);
+  const total = items.reduce((n, i) => n + i.file.size, 0);
   let doneBytes = 0, ok = 0, failed = [];
   const show = (name, cur) => {
     const sent = doneBytes + cur;
-    $("fl-uploads").innerHTML = `<div class="card"><div class="card-head"><span class="name">Uploading ${ok + failed.length + 1}/${files.length}: ${esc(name)}</span></div>
+    $("fl-uploads").innerHTML = `<div class="card"><div class="card-head"><span class="name">Uploading ${ok + failed.length + 1}/${items.length}: ${esc(name)}</span></div>
       <div class="bar"><div style="width:${total ? (100 * sent / total).toFixed(1) : 100}%"></div></div>
       <div class="facts">${bytes(sent)} / ${bytes(total)} · keep this tab open</div></div>`;
   };
-  for (const f of files) {
-    const rel = join(dir, f.webkitRelativePath || f.name);
-    try { await uploadOne(f, rel, cur => show(rel, cur)); ok++; }
+  for (const { file, rel: sub } of items) {
+    const rel = join(dir, sub);
+    try { await uploadOne(file, rel, cur => show(rel, cur)); ok++; }
     catch (err) { failed.push(`${rel}: ${err.message}`); }
-    doneBytes += f.size;
+    doneBytes += file.size;
   }
   uploading = false;
   $("fl-uploads").innerHTML = "";
-  flMsg(`Uploaded ${ok} of ${files.length} file${files.length === 1 ? "" : "s"}.` + (failed.length ? "\nFailed (pick them again to resume):\n" + failed.join("\n") : ""), failed.length > 0);
+  flMsg(`Uploaded ${ok} of ${items.length} file${items.length === 1 ? "" : "s"}.` + skipped +
+    (failed.length ? "\nFailed (upload them again to resume):\n" + failed.join("\n") : ""), failed.length > 0);
   loadFiles(true); loadStorage(true);
 }
+$("fl-zip").onclick = () => downloadZip(curPath());
 async function uploadOne(file, rel, progress) {
   const q = `path=${enc(rel)}&size=${file.size}&mtime=${file.lastModified}`;
   for (let attempt = 0; ; attempt++) {
