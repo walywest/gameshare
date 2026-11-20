@@ -1,10 +1,10 @@
-"""FitFast web UI: turn a FitGirl page (or FuckingFast links) into direct links.
+"""FitFast web API: a link grabber and server-side downloads past Cloudflare.
 
-The web UI never downloads anything. It does the part that needs a stealth
-browser — getting past Cloudflare on fitgirl-repacks.site and fuckingfast.co —
-and hands back the signed https://dl.fuckingfast.co/dl/<token> URLs. Those need
-no cookies, so the visitor pastes them into JDownloader, aria2, a browser, or
-whatever they like.
+Paste a FitGirl page, or text holding links on any host in hosts.py. A job
+("check links") resolves each link to its signed direct URL, with its name and,
+where the host allows, its exact size, which is the part that needs to get past
+Cloudflare. From there the links can be copied for another downloader, or
+queued as a package for the server's own downloader (manager.py).
 
 Design notes
 ------------
@@ -43,8 +43,10 @@ from .bootstrap import browser_ready, browser_staleness_warning, install_in_subp
 from .config import APP_VERSION
 from .log import get_logger, setup_logging
 from .resolve_proc import SubprocessResolver
-from .resolver import (DeadLinkError, ResolveError, fast_resolve,
+from .hosts import HOSTS, host_for, probe
+from .resolver import (DeadLinkError, ResolveError, common_folder_name, fast_resolve,
                        filename_from_fragment, valid_url)
+from urllib.parse import urlsplit
 from .scrape_proc import SubprocessScraper
 from .scraper import ScrapeError, fast_scrape, game_title_from_links, is_fitgirl_url
 
@@ -59,6 +61,8 @@ MAX_ACTIVE_JOBS = 3          # queued/running jobs at once, across all users
 MAX_STORED_JOBS = 30
 JOB_TTL_S = 6 * 3600
 LINK_SPLIT_RE = re.compile(r"\s+")
+URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
+HOST_LABELS = ", ".join(h.label for h in HOSTS)
 
 
 def _env_int(name: str, default: int) -> int:
@@ -79,7 +83,7 @@ _pool = ThreadPoolExecutor(max_workers=FAST_PARALLEL, thread_name_prefix="resolv
 # ── jobs ──────────────────────────────────────────────────────────────────────
 
 class Item:
-    __slots__ = ("source", "filename", "status", "url", "error", "resolved_at")
+    __slots__ = ("source", "filename", "status", "url", "error", "resolved_at", "host", "size")
 
     def __init__(self, source: str) -> None:
         self.source = source
@@ -88,11 +92,14 @@ class Item:
         self.url: str | None = None
         self.error: str | None = None
         self.resolved_at: float | None = None
+        h = host_for(source)
+        self.host = h.label if h else ""
+        self.size: int | None = None   # exact, from a 1-byte probe, where the host allows
 
     def as_dict(self) -> dict:
         return {"source": self.source, "filename": self.filename,
                 "status": self.status, "url": self.url, "error": self.error,
-                "resolved_at": self.resolved_at}
+                "resolved_at": self.resolved_at, "host": self.host, "size": self.size}
 
 
 class Job:
@@ -109,6 +116,11 @@ class Job:
         self.lock = threading.Lock()
         self._active: set = set()      # in-flight scraper/resolver handles
         self._pending = 0
+        self.ignored: list[str] = []   # hosts of pasted links no plugin handles
+        # Set when the links should go straight to the download queue once
+        # checked: {"extract": bool, "delete_archives": bool}.
+        self.autostart: dict | None = None
+        self.queued: str | None = None  # the download it was queued as
 
     # Handles are registered so cancel() can kill their browser processes.
     def _track(self, handle) -> bool:
@@ -150,7 +162,9 @@ class Job:
                 counts[it.status] += 1
             return {"id": self.id, "phase": self.phase, "title": self.title,
                     "error": self.error, "created": self.created,
-                    "finished": self.finished, "counts": counts, "items": items}
+                    "finished": self.finished, "counts": counts, "items": items,
+                    "ignored": self.ignored, "autostart": self.autostart is not None,
+                    "queued": self.queued}
 
 
 class JobStore:
@@ -192,27 +206,38 @@ class InputError(Exception):
 JOBS = JobStore()
 
 
-def parse_input(text: str) -> tuple[str | None, list[str]]:
-    """Return (fitgirl_page_url, []) or (None, fuckingfast_links)."""
-    tokens = [t for t in LINK_SPLIT_RE.split(text.strip()) if t]
-    if not tokens:
-        raise InputError("paste a fitgirl-repacks.site page URL or fuckingfast.co links")
-    fitgirl = [t for t in tokens if is_fitgirl_url(t)]
+def parse_input(text: str) -> tuple[str | None, list[str], list[str]]:
+    """Find what to download in pasted text.
+
+    Returns (fitgirl_page, [], []) or (None, links, ignored_hosts). Text around
+    the links is fine, so a whole post or a page's mirror list can be pasted:
+    links on hosts without a plugin are left out and their hosts reported.
+    """
+    urls = [u.rstrip(").,;:'\"<>") for u in URL_RE.findall(text or "")]
+    if not urls:
+        raise InputError(f"paste a FitGirl page, or links from {HOST_LABELS}")
+    fitgirl = list(dict.fromkeys(u for u in urls if is_fitgirl_url(u)))
     if fitgirl:
-        if len(tokens) > 1:
-            raise InputError("paste one FitGirl page at a time (or only fuckingfast.co links)")
-        return fitgirl[0], []
-    links, seen = [], set()
-    for t in tokens:
-        if not valid_url(t):
-            raise InputError(f"not a fitgirl-repacks.site or fuckingfast.co link: {t[:80]}")
-        key = t.split("#", 1)[0]
+        if len(fitgirl) > 1 or any(valid_url(u) for u in urls):
+            raise InputError("paste one FitGirl page at a time, or only file links")
+        return fitgirl[0], [], []
+    links, seen, ignored = [], set(), []
+    for u in urls:
+        if not valid_url(u):
+            host = urlsplit(u).netloc.lower()
+            if host and host not in ignored:
+                ignored.append(host)
+            continue
+        key = u.split("#", 1)[0].rstrip("/")
         if key not in seen:
             seen.add(key)
-            links.append(t)
+            links.append(u)
+    if not links:
+        found = f" (found {', '.join(ignored[:6])})" if ignored else ""
+        raise InputError(f"no links from a supported host{found}. Supported: FitGirl pages, {HOST_LABELS}")
     if len(links) > MAX_LINKS:
         raise InputError(f"too many links ({len(links)}); max is {MAX_LINKS}")
-    return None, links
+    return None, links, ignored
 
 
 def _scrape(job: Job, page_url: str) -> list[str] | None:
@@ -275,11 +300,16 @@ def _resolve_item(job: Job, item: Item) -> None:
         if res is None:
             return
         signed, filename = res
+        host = host_for(item.source)
+        size = served_name = None
+        if host is not None and host.probe:
+            size, served_name = probe(signed)
         with job.lock:
             if item.status == "cancelled":
                 return
             item.url = signed
-            item.filename = filename or item.filename
+            item.filename = filename or served_name or item.filename
+            item.size = size
             item.status = "done"
             item.resolved_at = time.time()
     finally:
@@ -295,7 +325,36 @@ def _item_finished(job: Job) -> None:
         job.finished = time.time()
         ok = sum(1 for it in job.items if it.status == "done")
         total = len(job.items)
+        if not job.title:  # links that carry no name until resolved
+            names = [it.filename for it in job.items if it.filename]
+            job.title = common_folder_name(names) if names else None
+        auto = job.autostart is not None and job.queued is None
     get_logger().info("web: job %s finished: %d/%d resolved", job.id, ok, total)
+    if auto:
+        _autostart(job)
+
+
+def _autostart(job: Job) -> None:
+    """Queue what a "download now" job resolved. Links that failed to resolve
+    stay on the job's card, where they can be retried."""
+    with job.lock:
+        items = [it for it in job.items if it.status == "done"]
+        opts, title = job.autostart or {}, job.title
+    if not items or MANAGER is None:
+        with job.lock:
+            job.error = "no link resolved, so nothing was queued"
+        return
+    try:
+        game = MANAGER.add(None, [it.source for it in items], bool(opts.get("extract", True)),
+                           bool(opts.get("delete_archives", False)), title,
+                           names={it.source: it.filename for it in items})
+    except ValueError as e:
+        with job.lock:
+            job.error = str(e)
+        return
+    with job.lock:
+        job.queued = game.id
+    get_logger().info("web: job %s queued as download %s", job.id, game.id)
 
 
 def _submit(job: Job, items: list[Item]) -> None:
@@ -310,7 +369,9 @@ def _submit(job: Job, items: list[Item]) -> None:
 def run_job(job: Job) -> None:
     log = get_logger()
     try:
-        page_url, links = parse_input(job.text)
+        page_url, links, ignored = parse_input(job.text)
+        with job.lock:
+            job.ignored = ignored
         if page_url:
             with job.lock:
                 job.phase = "scraping"
@@ -478,7 +539,7 @@ class Handler(BaseHTTPRequestHandler):
                 "version": APP_VERSION, "browser_ready": browser_ready(),
                 "browser": BROWSER, "downloads": MANAGER is not None,
                 "warning": browser_staleness_warning(), "parallel": PARALLEL,
-                "max_links": MAX_LINKS})
+                "max_links": MAX_LINKS, "hosts": ["FitGirl pages"] + [h.label for h in HOSTS]})
         if path == "/api/downloads":
             if MANAGER is None:
                 return self._json(HTTPStatus.NOT_FOUND, {"error": "server-side downloads are off (no --root)"})
@@ -525,15 +586,11 @@ class Handler(BaseHTTPRequestHandler):
             text = str(data.get("text", ""))
             try:
                 parse_input(text)  # fail fast on obviously bad input
-                job = Job(text)
-                JOBS.add(job)
+                job = self._start_job(Job(text))
             except InputError as e:
                 return self._json(HTTPStatus.BAD_REQUEST, {"error": str(e)})
             except BusyError as e:
                 return self._json(HTTPStatus.TOO_MANY_REQUESTS, {"error": str(e)})
-            get_logger().info("web: job %s created by %s", job.id, self.client_address[0])
-            threading.Thread(target=run_job, args=(job,), daemon=True,
-                             name=f"job-{job.id}").start()
             return self._json(HTTPStatus.CREATED, {"id": job.id})
         if path.startswith("/api/downloads"):
             return self._post_download(path)
@@ -545,6 +602,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(HTTPStatus.OK, {"retried": retry_failed(job)})
         self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
+    def _start_job(self, job: Job) -> Job:
+        JOBS.add(job)  # raises BusyError
+        get_logger().info("web: job %s created by %s", job.id, self.client_address[0])
+        threading.Thread(target=run_job, args=(job,), daemon=True, name=f"job-{job.id}").start()
+        return job
+
     def _post_download(self, path: str):
         if MANAGER is None:
             return self._json(HTTPStatus.NOT_FOUND, {"error": "server-side downloads are off (no --root)"})
@@ -554,22 +617,40 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/downloads":
             extract = _flag(data, "extract", True)
             delete = _flag(data, "delete_archives", False)
-            title = None
+            title, names = None, None
             if data.get("job"):
                 job = JOBS.get(str(data["job"]))
                 if job is None:
                     return self._json(HTTPStatus.NOT_FOUND, {"error": "link job not found (expired?)"})
+                # The link grabber sends the links ticked and the package name typed.
+                wanted = data.get("sources")
+                wanted = set(map(str, wanted)) if isinstance(wanted, list) else None
                 with job.lock:
-                    page, links, title = None, [it.source for it in job.items], job.title
+                    items = [it for it in job.items if wanted is None or it.source in wanted]
+                    page, links = None, [it.source for it in items]
+                    names = {it.source: it.filename for it in items if it.filename}
+                    title = str(data.get("title") or "").strip()[:200] or job.title
                 if not links:
-                    return self._json(HTTPStatus.BAD_REQUEST, {"error": "that job has no links yet"})
+                    return self._json(HTTPStatus.BAD_REQUEST, {"error": "no links picked"})
             else:
+                text = str(data.get("text", ""))
                 try:
-                    page, links = parse_input(str(data.get("text", "")))
+                    page, links, _ = parse_input(text)
                 except InputError as e:
                     return self._json(HTTPStatus.BAD_REQUEST, {"error": str(e)})
+                if not page and any(not filename_from_fragment(l) for l in links):
+                    # Names that only come from resolving (anything but FitGirl's
+                    # links): check them first, then queue. The package is named
+                    # from them, which is the folder it lands in.
+                    job = Job(text)
+                    job.autostart = {"extract": extract, "delete_archives": delete}
+                    try:
+                        self._start_job(job)
+                    except BusyError as e:
+                        return self._json(HTTPStatus.TOO_MANY_REQUESTS, {"error": str(e)})
+                    return self._json(HTTPStatus.ACCEPTED, {"job": job.id})
             try:
-                game = MANAGER.add(page, links, extract, delete, title)
+                game = MANAGER.add(page, links, extract, delete, title, names=names)
             except ValueError as e:
                 return self._json(HTTPStatus.TOO_MANY_REQUESTS, {"error": str(e)})
             get_logger().info("web: download %s queued by %s", game.id, self.client_address[0])

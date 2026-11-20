@@ -29,6 +29,17 @@ A file counts as complete only when all of these hold:
 
 Anything short of that is re-resolved and handed back to aria2, which resumes
 from the control file if it is there and restarts the part if it is not.
+
+Split downloads
+---------------
+Hosts that answer bounded Range requests get several connections per file
+(hosts.Host.connections). Those write segments at scattered offsets, so a
+partial reaches full length long before it's done, and interior holes are
+normal rather than damage. Callers pass ``split=True`` for such files, and
+then a file's length alone never counts as evidence: it must also have no
+holes (no unallocated ranges on disk), which is what a finished file looks
+like. One with holes and no control file has lost its segment map, so it's
+discarded and fetched again.
 """
 from __future__ import annotations
 
@@ -41,6 +52,20 @@ from pathlib import Path
 
 MANIFEST_NAME = ".fitfast.json"
 _FORMAT_VERSION = 1
+
+
+def _has_holes(path: Path) -> bool:
+    """Whether a file has unallocated ranges: fewer bytes on disk than its length.
+
+    A split download leaves holes until every segment lands. A filesystem
+    without sparse files reports none, which is the old, single-connection
+    behaviour: nothing worse than before.
+    """
+    try:
+        st = path.stat()
+    except OSError:
+        return False
+    return st.st_blocks * 512 < st.st_size
 
 
 def _parse_aria2_control(raw: bytes) -> tuple[int, int, bytes]:
@@ -197,7 +222,7 @@ class DownloadState:
             entry["complete"] = True
         self.save()
 
-    def adopt_if_finished(self, url: str) -> int | None:
+    def adopt_if_finished(self, url: str, split: bool = False) -> int | None:
         """Record a file that finished on disk but was never marked complete.
 
         A download can finish and the run end before we get to write the
@@ -210,6 +235,9 @@ class DownloadState:
         no control file beside it. Since downloads no longer preallocate
         (``--file-allocation=none``), reaching full length means the bytes were
         actually transferred.
+
+        For a split download (see the module docstring) full length proves
+        nothing, so it must also have no holes.
 
         Returns the adopted size, or None if there was nothing to adopt.
         """
@@ -227,6 +255,8 @@ class DownloadState:
             if target.stat().st_size != total:
                 return None
         except OSError:
+            return None
+        if split and _has_holes(target):
             return None
         self.record_complete(url, name, total)
         return total
@@ -246,7 +276,7 @@ class DownloadState:
             return None
         return None if (self.folder / name).exists() else name
 
-    def clear_ghost_file(self, url: str) -> str | None:
+    def clear_ghost_file(self, url: str, split: bool = False) -> str | None:
         """Delete a preallocated-but-unfinished leftover we know we created.
 
         Legacy hazard: downloads used to run with ``--file-allocation=falloc``,
@@ -264,6 +294,10 @@ class DownloadState:
         :meth:`adopt_if_finished`, which runs first). So we now additionally
         require positive evidence of interruption: a checkpoint that recorded
         genuinely fewer bytes than the file's full length.
+
+        A split download (see the module docstring) with holes and no control
+        file has lost its segment map: aria2 would read its length as progress
+        and call it done. It's removed whatever its size.
 
         A file with no manifest entry is still left strictly alone.
 
@@ -284,6 +318,8 @@ class DownloadState:
             size = target.stat().st_size
         except OSError:
             return None
+        if split and _has_holes(target):
+            return self._discard(url, target)
         # A *smaller-than-full* file with no control file is a legitimate
         # sequential partial (e.g. one healed by heal_fragmented_partial):
         # aria2 resumes it with an open-ended request from its current size.
@@ -295,6 +331,9 @@ class DownloadState:
         completed = entry.get("completed")
         if not isinstance(completed, int) or completed >= total:
             return None
+        return self._discard(url, target)
+
+    def _discard(self, url: str, target: Path) -> str | None:
         try:
             target.unlink()
         except OSError:
@@ -304,7 +343,7 @@ class DownloadState:
             if e is not None:
                 e["completed"] = 0
         self.save()
-        return name
+        return target.name
 
     def heal_fragmented_partial(self, url: str) -> int | None:
         """Repair a partial left with interior gaps by an older multi-connection

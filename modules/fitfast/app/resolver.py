@@ -1,6 +1,10 @@
-"""Resolve fuckingfast.co URLs to signed direct download URLs via Camoufox.
+"""Resolve host links to signed direct download URLs; Camoufox as the fallback.
 
-The flow (probed 2026-07-12; challenge step re-diagnosed 2026-08-30):
+Each host's own steps live in hosts.py. This module holds what they share:
+the errors, the curl_cffi session, filename helpers, and the Camoufox driver.
+
+The browser flow (probed 2026-07-12 on fuckingfast.co; challenge step
+re-diagnosed 2026-08-30):
   1. Load the page and wait for Cloudflare to be satisfied. This used to be a
      passive JS challenge Camoufox cleared on its own, so a fixed 2.5s wait was
      enough. It is now an interactive Turnstile widget: a live trace showed
@@ -10,9 +14,8 @@ The flow (probed 2026-07-12; challenge step re-diagnosed 2026-08-30):
      never reached at all — zero /go requests. We now wait for the widget's
      token instead of guessing at a duration.
   2. Block ad domains + neuter window.open so popups don't fire.
-  3. Click the DOWNLOAD button twice. The second click triggers an HTMX
-     POST to /f/<id>/go whose response header `hx-redirect` contains the
-     pre-signed https://dl.fuckingfast.co/dl/<token> URL.
+  3. Click the host's download button. Its HTMX request's response header
+     `hx-redirect` carries the pre-signed direct URL.
   4. That signed URL is Range-capable and needs no cookies to download.
 """
 from __future__ import annotations
@@ -22,8 +25,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from camoufox.sync_api import Camoufox
-
+# Kept for the legacy TUI; valid_url() is what knows every host.
 LINK_RE = re.compile(r"^https?://fuckingfast\.co/[a-z0-9]+", re.IGNORECASE)
 _INVALID_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 FIREFOX_UA = (
@@ -41,15 +43,8 @@ class DeadLinkError(ResolveError):
 
 
 # ── Fast path: no browser ────────────────────────────────────────────────────
-# The DOWNLOAD button is only an HTMX POST to /f/<id>/go, and the signed URL
-# comes back in its `hx-redirect` header. Cloudflare gates that endpoint on the
-# TLS fingerprint, not on Turnstile, so a Chrome-impersonating client
-# (curl_cffi) gets the answer directly in ~0.3s instead of the 10-30s a browser
-# launch + Turnstile wait costs. Measured live 2026-11-04. When the site does
-# demand a captcha ("captcha verification failed"), or anything else is off,
-# callers fall back to the Camoufox Resolver below.
-FF_HOST = "https://fuckingfast.co"
-_FF_ID_RE = re.compile(r"^https?://fuckingfast\.co/([A-Za-z0-9]+)", re.IGNORECASE)
+# curl_cffi with Chrome's TLS fingerprint, which is what Cloudflare's bot check
+# keys on. Each host's request shape is in hosts.py.
 _tls = threading.local()
 
 
@@ -63,39 +58,27 @@ def http_session():
     return s
 
 
-def fast_resolve(url: str, timeout: float = 20.0) -> tuple[str, str]:
+def _host(url: str):
+    from .hosts import host_for   # hosts.py imports this module
+    host = host_for(url)
+    if host is None:
+        raise ResolveError(f"no host plugin for that link: {url[:80]}")
+    return host
+
+
+def fast_resolve(url: str) -> tuple[str, str]:
     """Return (signed_url, filename) without a browser.
 
     Raises DeadLinkError for a removed file, ResolveError for anything the
     browser path might still get past.
     """
-    m = _FF_ID_RE.match(url.strip())
-    if not m:
-        raise ResolveError("not a fuckingfast.co link")
-    file_id = m.group(1)
-    page = f"{FF_HOST}/{file_id}"
-    try:
-        r = http_session().post(
-            f"{FF_HOST}/f/{file_id}/go", data=b"", allow_redirects=False,
-            timeout=timeout, headers={
-                "Accept": "*/*", "HX-Request": "true", "HX-Current-URL": page,
-                "Origin": FF_HOST, "Referer": page, "Sec-Fetch-Dest": "empty",
-                "Sec-Fetch-Mode": "cors", "Sec-Fetch-Site": "same-origin"})
-    except Exception as e:
-        raise ResolveError(f"fast resolve: {type(e).__name__}: {e}") from e
-    hx = r.headers.get("hx-redirect")
-    if hx and "/dl/" in hx:
-        return hx.strip(), Resolver._pick_filename(url, "")
-    body = (r.text or "")[:400].lower()
-    if r.status_code == 404 or "not found" in body:
-        raise DeadLinkError("file not found on fuckingfast.co (removed?)")
-    if "captcha" in body:
-        raise ResolveError("fast resolve: captcha required")
-    raise ResolveError(f"fast resolve: HTTP {r.status_code}, no hx-redirect")
+    return _host(url).fast_resolve(url)
 
 
 def valid_url(line: str) -> bool:
-    return bool(LINK_RE.match(line.strip()))
+    """Whether a link is on a host we can download from."""
+    from .hosts import host_for
+    return host_for(line.strip()) is not None
 
 
 def sanitize_filename(name: str) -> str:
@@ -119,13 +102,13 @@ def common_folder_name(filenames: list[str], fallback: str | None = None) -> str
     is unusable.
     """
     if not filenames:
-        return fallback or f"fitgirl_download_{datetime.now():%Y%m%d_%H%M%S}"
+        return fallback or f"download_{datetime.now():%Y%m%d_%H%M%S}"
     if len(filenames) == 1:
         base = re.sub(r"\.part\d+\.(rar|r\d+|zip|7z)$", "", filenames[0], flags=re.IGNORECASE)
         base = re.sub(r"\.(rar|zip|7z)$", "", base, flags=re.IGNORECASE)
         base = base.strip("._- ")
         if len(base) < 3:
-            base = fallback or f"fitgirl_download_{datetime.now():%Y%m%d_%H%M%S}"
+            base = fallback or f"download_{datetime.now():%Y%m%d_%H%M%S}"
         return sanitize_filename(base)
 
     prefix = filenames[0]
@@ -138,7 +121,7 @@ def common_folder_name(filenames: list[str], fallback: str | None = None) -> str
     prefix = re.sub(r"\.part\d*$", "", prefix, flags=re.IGNORECASE)
     prefix = prefix.rstrip("._- ")
     if len(prefix) < 3:
-        prefix = fallback or f"fitgirl_download_{datetime.now():%Y%m%d_%H%M%S}"
+        prefix = fallback or f"download_{datetime.now():%Y%m%d_%H%M%S}"
     return sanitize_filename(prefix)
 
 
@@ -176,6 +159,7 @@ class Resolver:
         # the site now serves an interactive Turnstile. Cursor simulation costs
         # us time on every resolve, which is why it was off; being unable to
         # resolve at all costs more.
+        from camoufox.sync_api import Camoufox   # heavy; only the browser path needs it
         self._cm = Camoufox(headless=True, humanize=True, geoip=False)
         self._browser = self._cm.__enter__()
 
@@ -215,6 +199,7 @@ class Resolver:
             raise ResolveError(f"resolve failed after retries: {last_err}") from last_err
 
     def _resolve_once(self, url: str) -> tuple[str, str]:
+        host = _host(url)
         self._ensure_browser()
         assert self._browser is not None
         page = self._browser.new_page()
@@ -266,8 +251,8 @@ class Resolver:
                 if hx:
                     captured["signed_url"] = hx
                     return
-                if len(trace) < 12 and (
-                        "/f/" in resp.url or resp.request.method != "GET"):
+                if len(trace) < 12 and ("/f/" in resp.url or "/download" in resp.url
+                                        or resp.request.method != "GET"):
                     trace.append(
                         f"{resp.request.method} {_shape(resp.url)} -> {resp.status}")
             except Exception:
@@ -276,25 +261,7 @@ class Resolver:
         page.on("response", on_response)
 
         try:
-            page.goto(url, wait_until="domcontentloaded", timeout=60_000)
-            challenge = self._await_challenge(page)
-            page.wait_for_timeout(500)   # let the button's handler bind
-
-            title = ""
-            try:
-                title = page.title() or ""
-            except Exception:
-                pass
-
-            try:
-                page.evaluate("window.open = function(){ return null; }")
-            except Exception:
-                pass
-
-            page.click("a.link-button", timeout=30_000)
-            page.wait_for_timeout(1200)
-
-            page.click("a.link-button", timeout=30_000)
+            title, challenge = host.browser(page, url, self._await_challenge)
 
             deadline = time.time() + 20
             while captured["signed_url"] is None and time.time() < deadline:
@@ -306,8 +273,7 @@ class Resolver:
                     "no hx-redirect header on any response after 20s "
                     f"(challenge: {challenge}; saw: {detail})")
 
-            filename = self._pick_filename(url, title)
-            return captured["signed_url"], filename
+            return captured["signed_url"], host.filename(url, title)
         finally:
             try:
                 page.close()
@@ -341,19 +307,3 @@ class Resolver:
                     return "solved"
             page.wait_for_timeout(250)
         return "unsolved" if seen_widget else "none"
-
-    @staticmethod
-    def _pick_filename(url: str, title: str) -> str:
-        # The URL fragment is the *per-file* name (e.g. #Game.part03.rar) that
-        # FitGirl links carry, so it wins whenever present. The page <title> is
-        # only a fallback for bare links pasted without a fragment: FuckingFast
-        # serves the SAME title for every part of a repack, so preferring it
-        # named every part identically — files collided under one name and
-        # matched none of the links that were pasted.
-        frag = filename_from_fragment(url)
-        if frag:
-            return frag
-        if title and title.strip() and title.strip().lower() not in ("fuckingfast", "fuckingfast.co"):
-            return sanitize_filename(title.strip())
-        m = re.search(r"/([a-z0-9]+)$", url.split("#", 1)[0])
-        return f"{m.group(1) if m else 'download'}.bin"

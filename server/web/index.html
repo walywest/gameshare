@@ -28,10 +28,11 @@ button { font: inherit; padding: 7px 13px; border-radius: 7px; border: 1px solid
 button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
 button.small { padding: 3px 9px; font-size: 13px; }
 button:disabled { opacity: .5; cursor: default; }
-textarea, input[type=number] { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border);
+textarea, input[type=number], input[type=text] { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border);
   border-radius: 7px; padding: 8px; }
 textarea { width: 100%; min-height: 70px; resize: vertical; }
 input[type=number] { width: 80px; }
+input.pkg { flex: 1; min-width: 160px; padding: 6px 8px; font-weight: 600; }
 label { font-size: 14px; display: inline-flex; gap: 6px; align-items: center; }
 .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 10px; }
 .msg { margin-top: 10px; font-size: 14px; white-space: pre-wrap; }
@@ -128,18 +129,21 @@ h3 { font-size: 14px; margin: 16px 0 0; }
   </section>
 
   <section id="fitfast">
-    <h2>FitFast downloads</h2>
+    <h2>Downloads</h2>
+    <div class="meta">Paste links, or a whole page of text with links in it. The server gets past Cloudflare itself:
+      a Chrome fingerprint first, a stealth browser if that's refused. Supported: <b id="ff-hosts">FitGirl pages, FuckingFast, BuzzHeavier</b>.</div>
     <div class="meta" id="ff-status"></div>
-    <textarea id="ff-text" placeholder="Paste a fitgirl-repacks.site game page, or fuckingfast.co links"></textarea>
+    <textarea id="ff-text" placeholder="Paste links, a FitGirl page, or any text with links in it"></textarea>
     <div class="row">
-      <button class="primary" id="ff-download">Download on server</button>
-      <button id="ff-links">Get links only</button>
+      <button class="primary" id="ff-check">Check links</button>
+      <button id="ff-download">Download now</button>
       <label><input type="checkbox" id="ff-extract" checked> Extract when done</label>
       <label><input type="checkbox" id="ff-delete"> Delete archives after</label>
     </div>
     <div class="msg" id="ff-msg"></div>
     <div id="ff-linkjob"></div>
-    <div class="row">
+    <h3>Queue</h3>
+    <div class="row" style="margin-top:6px">
       <label>Speed limit <input type="number" id="ff-limit" min="0" step="1" value="0"> MB/s (0 = none)</label>
       <button class="small" id="ff-limit-set">Set</button>
       <span class="meta" id="ff-speed"></span>
@@ -151,7 +155,7 @@ h3 { font-size: 14px; margin: 16px 0 0; }
 "use strict";
 const $ = id => document.getElementById(id);
 const FF = "/svc/fitfast";
-let version = null, openLogs = new Set(), openParts = new Set(), linkJob = null;
+let version = null, openLogs = new Set(), openParts = new Set();
 
 async function api(method, path, body) {
   const opt = { method, headers: {} };
@@ -297,13 +301,14 @@ async function loadFitFast() {
   else if (!status.browser_ready) bits.push("Stealth browser not installed; only browserless resolving works.");
   if (status.warning) bits.push(status.warning);
   $("ff-status").textContent = bits.join(" ");
+  if (status.hosts) $("ff-hosts").textContent = status.hosts.join(", ");
   if (!limitTouched) $("ff-limit").value = d.limit_mbps || 0;
   $("ff-speed").textContent = d.speed ? "Now " + bytes(d.speed) + "/s" : "";
   ffBusy = d.games.some(g => ["downloading", "scraping", "extracting"].includes(g.state));
   ffGames = d.games;
   renderStorage();
 
-  if (!d.games.length) { $("ff-games").innerHTML = `<div class="empty" style="margin-top:10px">No downloads yet. Finished games land in the shared folder under FitFast/, ready to pull with gs.</div>`; return; }
+  if (!d.games.length) { $("ff-games").innerHTML = `<div class="empty" style="margin-top:10px">Nothing queued yet. Each package lands in the share under FitFast/&lt;package&gt;/, ready to pull with gs or download from Files.</div>`; return; }
   let html = "";
   for (const g of d.games.slice().reverse()) {
     const frac = g.total ? g.completed / g.total : (g.state === "done" ? 1 : 0);
@@ -360,49 +365,156 @@ $("ff-games").addEventListener("click", async e => {
   } catch (err) { ffMsg(err.message, true); }
   loadFitFast();
 });
-$("ff-download").addEventListener("click", async () => {
-  const text = $("ff-text").value.trim();
-  if (!text && !linkJob) { ffMsg("Paste a FitGirl page or FuckingFast links first.", true); return; }
-  const body = { extract: $("ff-extract").checked, delete_archives: $("ff-delete").checked };
-  if (text) body.text = text; else body.job = linkJob;
-  try { await api("POST", FF + "/api/downloads", body); ffMsg("Queued on the server."); $("ff-text").value = ""; linkJob = null; $("ff-linkjob").innerHTML = ""; }
-  catch (e) { ffMsg(e.message, true); }
-  loadFitFast();
-});
 $("ff-limit").addEventListener("input", () => { limitTouched = true; });
 $("ff-limit-set").addEventListener("click", async () => {
   try { await api("POST", FF + "/api/downloads/limit", { mbps: Number($("ff-limit").value) || 0 }); limitTouched = false; ffMsg("Speed limit set."); }
   catch (e) { ffMsg(e.message, true); }
 });
 
-// Links only: the original FitFast flow, for handing links to another downloader.
-$("ff-links").addEventListener("click", async () => {
+// The link grabber, as in JDownloader: check what was pasted (name, host, exact
+// size where the host allows, online or not), pick what to fetch, name the
+// package (the folder it lands in), then queue it. "Download now" skips the
+// review; links that only get a name once resolved are still checked first.
+let grab = null;   // { id, auto, unpicked: Set of sources, nameTouched, timer, job }
+const ffOpts = () => ({ extract: $("ff-extract").checked, delete_archives: $("ff-delete").checked });
+const jobActive = j => ["queued", "scraping", "resolving"].includes(j.phase);
+const itemState = it => it.status === "done" ? ["online", "s-ok"]
+  : it.status === "error" ? [/not found|removed/i.test(it.error || "") ? "offline" : "failed", "s-bad"]
+  : it.status === "resolving" ? ["checking…", "s-warn"]
+  : it.status === "cancelled" ? ["cancelled", "s-muted"] : ["waiting", "s-muted"];
+
+// navigator.clipboard only exists on https or localhost, and this page is plain http.
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); return true; } catch {}
+  const ta = document.createElement("textarea");
+  ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+  document.body.appendChild(ta); ta.select();
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch {}
+  ta.remove();
+  return ok;
+}
+
+$("ff-check").addEventListener("click", async () => {
   const text = $("ff-text").value.trim();
-  if (!text) { ffMsg("Paste a FitGirl page or FuckingFast links first.", true); return; }
-  try { const { id } = await api("POST", FF + "/api/jobs", { text }); linkJob = id; ffMsg("Getting links…"); pollLinkJob(); }
+  if (!text) { ffMsg("Paste some links first.", true); return; }
+  try { const { id } = await api("POST", FF + "/api/jobs", { text }); ffMsg(""); openGrab(id, false); }
   catch (e) { ffMsg(e.message, true); }
 });
-async function pollLinkJob() {
-  if (!linkJob) return;
-  let j;
-  try { j = await api("GET", `${FF}/api/jobs/${linkJob}`); } catch (e) { ffMsg(e.message, true); return; }
-  const done = j.items.filter(i => i.status === "done");
-  const urls = done.map(i => i.url);
-  $("ff-linkjob").innerHTML = `<div class="card"><div class="card-head"><span class="name">${esc(j.title || "Links")}</span>
-      <span class="badge ${j.phase === "done" ? "s-ok" : j.phase === "failed" ? "s-bad" : "s-warn"}">${esc(j.phase)}</span>
-      <button class="small" id="ff-copy" ${urls.length ? "" : "disabled"}>Copy ${urls.length} link${urls.length === 1 ? "" : "s"}</button>
-      <button class="small" id="ff-job-dl">Download these on server</button></div>
-    ${j.error ? `<div class="facts s-bad">${esc(j.error)}</div>` : ""}
-    <div class="facts">${done.length}/${j.items.length} resolved. Signed links expire, so use them soon.</div>
-    ${urls.length ? `<pre class="links">${esc(urls.join("\n"))}</pre>` : ""}</div>`;
-  $("ff-copy").onclick = () => navigator.clipboard.writeText(urls.join("\n")).then(() => ffMsg("Copied."), () => ffMsg("Couldn't copy; select the links by hand.", true));
-  $("ff-job-dl").onclick = async () => {
-    try { await api("POST", FF + "/api/downloads", { job: linkJob, extract: $("ff-extract").checked, delete_archives: $("ff-delete").checked });
-      ffMsg("Queued on the server."); loadFitFast(); } catch (e) { ffMsg(e.message, true); }
+$("ff-download").addEventListener("click", async () => {
+  const text = $("ff-text").value.trim();
+  if (!text) { ffMsg("Paste some links first.", true); return; }
+  try {
+    const r = await api("POST", FF + "/api/downloads", { text, ...ffOpts() });
+    $("ff-text").value = "";
+    if (r.job) { ffMsg("Checking the links first; the download starts by itself after."); openGrab(r.job, true); }
+    else ffMsg("Queued on the server.");
+  } catch (e) { ffMsg(e.message, true); }
+  loadFitFast();
+});
+
+function openGrab(id, auto) {
+  if (grab && grab.timer) clearTimeout(grab.timer);
+  grab = { id, auto, unpicked: new Set(), nameTouched: false, timer: null, job: null };
+  $("ff-linkjob").innerHTML = `<div class="card">
+    <div class="card-head">
+      <input type="text" id="ff-pkg" class="pkg" placeholder="Package name: the folder it lands in" ${auto ? "disabled" : ""}>
+      <span class="badge s-warn" id="ff-phase">checking</span>
+      <button class="small" id="ff-discard">${auto ? "Hide" : "Discard"}</button>
+    </div>
+    <div id="ff-lj-body"></div>
+    <div id="ff-lj-foot"></div></div>`;
+  $("ff-pkg").addEventListener("input", () => { if (grab) grab.nameTouched = true; });
+  $("ff-discard").onclick = async () => {
+    const g = grab;
+    grab = null; $("ff-linkjob").innerHTML = "";
+    if (g && g.timer) clearTimeout(g.timer);
+    // Hiding a "download now" card leaves it to start; discarding a check stops it.
+    if (g && !g.auto && g.job && jobActive(g.job)) { try { await api("DELETE", `${FF}/api/jobs/${g.id}`); } catch {} }
   };
-  if (["queued", "scraping", "resolving"].includes(j.phase)) setTimeout(pollLinkJob, 1500);
-  else if (j.phase === "done") ffMsg("");
+  pollGrab();
 }
+
+async function pollGrab() {
+  const g = grab; if (!g) return;
+  let j;
+  try { j = await api("GET", `${FF}/api/jobs/${g.id}`); }
+  catch (e) { ffMsg("The link check is gone: " + e.message, true); return; }
+  if (grab !== g) return;
+  g.job = j;
+  renderGrab();
+  if (jobActive(j) || (g.auto && !j.queued && !j.error)) g.timer = setTimeout(pollGrab, 1200);
+  else if (g.auto && j.queued) { ffMsg("Checked and queued: it's downloading below."); loadFitFast(); }
+}
+
+function renderGrab() {
+  const g = grab, j = g.job;
+  const checked = j.counts.done + j.counts.error;
+  $("ff-phase").textContent = j.phase === "scraping" ? "reading the page"
+    : j.phase === "resolving" ? `checking ${checked}/${j.items.length}` : j.phase;
+  $("ff-phase").className = "badge " + (j.phase === "done" ? "s-ok" : ["failed", "cancelled"].includes(j.phase) ? "s-bad" : "s-warn");
+  if (!g.nameTouched && j.title && $("ff-pkg").value !== j.title) $("ff-pkg").value = j.title;
+  const all = j.items.length && j.items.every(it => !g.unpicked.has(it.source));
+  $("ff-lj-body").innerHTML = j.items.length ? `<table class="list">
+    <tr><th><input type="checkbox" data-pick="all" ${all ? "checked" : ""} ${g.auto ? "disabled" : ""}></th>
+      <th>Name</th><th class="opt">Host</th><th class="num">Size</th><th class="num">Status</th></tr>
+    ${j.items.map((it, i) => { const [st, cls] = itemState(it); return `<tr>
+      <td><input type="checkbox" data-pick="${i}" ${g.unpicked.has(it.source) ? "" : "checked"} ${g.auto ? "disabled" : ""}></td>
+      <td class="name">${esc(it.filename || it.source)}${it.status === "error" && it.error ? `<div class="facts s-bad">${esc(it.error)}</div>` : ""}</td>
+      <td class="opt">${esc(it.host)}</td>
+      <td class="num">${it.size ? bytes(it.size) : "—"}</td>
+      <td class="num"><span class="${cls}">${st}</span></td></tr>`; }).join("")}</table>`
+    : `<div class="empty" style="margin-top:8px">${j.phase === "scraping" ? "Reading the FitGirl page…" : "No links yet."}</div>`;
+  renderGrabFoot();
+}
+
+function renderGrabFoot() {
+  const g = grab, j = g.job, active = jobActive(j);
+  const picked = j.items.filter(it => !g.unpicked.has(it.source));
+  const startable = picked.filter(it => itemState(it)[0] !== "offline");   // dead links stay out
+  const sized = picked.filter(it => it.size), size = sized.reduce((n, it) => n + it.size, 0);
+  const urls = picked.filter(it => it.status === "done").map(it => it.url);
+  const failed = j.items.filter(it => it.status === "error").length;
+  const bits = [`${picked.length} of ${j.items.length} picked`];
+  if (sized.length) bits.push(bytes(size) + (sized.length < picked.length ? ` (${picked.length - sized.length} without a size)` : ""));
+  const notes = [];
+  if (j.ignored && j.ignored.length) notes.push(["Left out links from hosts without a plugin: " + j.ignored.join(", ") + ".", ""]);
+  if (j.error) notes.push([j.error, "s-bad"]);
+  if (g.auto) notes.push([j.queued ? "Queued: it's in the list below." : "It starts downloading by itself once the links are checked.", ""]);
+  else if (!active && urls.length) notes.push(["Direct links expire, so copied ones are for using soon.", ""]);
+  $("ff-lj-foot").innerHTML = `<div class="facts">${esc(bits.join(" · "))}</div>
+    ${notes.map(([t, c]) => `<div class="facts ${c}">${esc(t)}</div>`).join("")}
+    ${g.auto ? "" : `<div class="row">
+      <button class="small primary" id="ff-start" ${startable.length && !active ? "" : "disabled"}>Start download (${startable.length})</button>
+      <button class="small" id="ff-copy" ${urls.length ? "" : "disabled"}>Copy ${urls.length} direct link${urls.length === 1 ? "" : "s"}</button>
+      ${failed && !active ? `<button class="small" id="ff-retry">Retry ${failed} failed</button>` : ""}
+    </div>`}`;
+  if (g.auto) return;
+  $("ff-start").onclick = async () => {
+    const title = $("ff-pkg").value.trim();
+    try {
+      await api("POST", FF + "/api/downloads", { job: g.id, sources: startable.map(it => it.source), title, ...ffOpts() });
+      ffMsg(`Queued ${startable.length} file${startable.length === 1 ? "" : "s"}${title ? ` as "${title}"` : ""}.`);
+      grab = null; $("ff-linkjob").innerHTML = ""; $("ff-text").value = "";
+    } catch (e) { ffMsg(e.message, true); }
+    loadFitFast();
+  };
+  $("ff-copy").onclick = async () => {
+    if (await copyText(urls.join("\n"))) { ffMsg(`Copied ${urls.length} link${urls.length === 1 ? "" : "s"}.`); return; }
+    ffMsg("Couldn't copy here; the links are below to select by hand.");
+    $("ff-lj-foot").insertAdjacentHTML("beforeend", `<pre class="links">${esc(urls.join("\n"))}</pre>`);
+  };
+  if ($("ff-retry")) $("ff-retry").onclick = async () => {
+    try { await api("POST", `${FF}/api/jobs/${g.id}/retry`, {}); pollGrab(); } catch (e) { ffMsg(e.message, true); }
+  };
+}
+$("ff-linkjob").addEventListener("change", e => {
+  const c = e.target.closest("input[data-pick]"); if (!c || !grab || !grab.job) return;
+  const items = grab.job.items;
+  if (c.dataset.pick === "all") { if (c.checked) grab.unpicked.clear(); else items.forEach(it => grab.unpicked.add(it.source)); }
+  else { const it = items[+c.dataset.pick]; if (it) c.checked ? grab.unpicked.delete(it.source) : grab.unpicked.add(it.source); }
+  renderGrab();
+});
 
 // ── storage ──────────────────────────────────────────────────────────────────
 let storage = null;

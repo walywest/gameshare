@@ -19,9 +19,11 @@ server/            Go server (port 8080): file API, CD updates, service supervis
 client/            gs: Bubble Tea TUI for transfers (runs in WSL). Its only homelab link is `U` (update)
 modules/fitfast/   FitFast downloader (Python), imported with git subtree (history kept)
   app/manager.py   headless server-side download engine (queue, aria2, retries, extract)
-  app/web.py       HTTP API: /api/status, /api/downloads*, /api/jobs* (links only)
+  app/hosts.py     one plugin per file host (FuckingFast, BuzzHeavier): fast resolve, browser steps
+  app/resolver.py  shared: errors, curl_cffi session, filename helpers, the Camoufox driver
+  app/web.py       HTTP API: /api/status, /api/downloads*, /api/jobs* (link grabber / check)
   app/tui.py       LEGACY Textual UI. Kept for reference; nothing runs it. Don't extend it
-  tests/           unittest for manager.py (fake aria2 + resolver)
+  tests/           unittest: manager (fake aria2 + resolver), hosts and link grabber (canned pages)
 homelab.json       desired state: which services run and how
 devenv.nix         ONE devenv for everything (Go server package, python venv, aria2, unar)
 ```
@@ -66,9 +68,10 @@ Git auth comes from `GIT_PASS` in `.env` (repo root or `server/`), fed through a
   - the queue is in `<root>/.fitfast/queue.json`, written atomically;
   - per-folder `.fitfast.json` manifests (from `app/state.py`) are what make resume correct. Read the long docstring in `state.py` before touching completeness logic.
 - **Engine:** one aria2 daemon, one resolver thread, games one at a time, and parts in parallel.
-  - **Resolving:** links go through `SubprocessResolver`, which tries curl_cffi first and falls back to Camoufox in a killable subprocess.
+  - **Resolving:** links go through `SubprocessResolver`, which tries curl_cffi first and falls back to Camoufox in a killable subprocess. What each host needs is a plugin in `hosts.py` (`fast_resolve`, `browser` steps, `filename`). A new host: subclass `Host`, add it to `HOSTS`, and test its parsing with canned pages in `tests/test_hosts.py`. Probe it live first, read-only (page, download button, a 1-byte Range request), never with a real download.
   - **Retries:** the TUI's rules apply (`MAX_FAILS_WITHOUT_PROGRESS = 8`, exponential backoff).
-  - **Downloads:** **one connection per file**, because the CDN breaks bounded Range requests (see the `downloader.py` docstring). Don't raise `--split`.
+  - **Connections:** per host (`Host.connections`). FuckingFast: **one per file**, because its CDN breaks bounded Range requests (see the `downloader.py` docstring); the daemon's global `--split=1` stays for it. BuzzHeavier: 8, since it caps each connection at ~350 KB/s and answers bounded ranges correctly. A split download's partial has holes and reaches full length early, so `state.py` takes `split=True` for those: no healing, and a file with holes never counts as finished (read its "Split downloads" docstring).
+  - **Link grabber:** a job (`/api/jobs`) resolves each link and, for hosts with `probe`, asks for one byte to learn the exact size. `POST /api/downloads` with `job`, `sources` and `title` queues the picked links as a package; with `text` of links that carry no filenames, it runs a job with `autostart` and queues once checked.
   - **SIGTERM:** stops aria2 cleanly, which keeps its control files, then saves the queue.
 - If the Camoufox browser is missing, it installs in the background on start (`BROWSER` status in `/api/status`). Fast resolving works without it.
 - `PYTHONUNBUFFERED=1` is set in `homelab.json`, so its logs reach the page live.
@@ -116,10 +119,11 @@ go build -C server -o /tmp/hl-server . && GAMESHARE_REPO=$PWD /tmp/hl-server 180
 
 That's how the first homelab rollout was verified (2026-11-10).
 
-## Status (2026-11-13)
+## Status (2026-11-20)
 
 - The box runs the homelab from `main`. Deploys so far were `git push origin main`, then `POST /api/update` (same as `U` in gs); each came back on its own with FitFast healthy.
 - A real FitGirl download (HITMAN WoA, 120 parts) has gone through the page end to end, including extraction. Tests still use only the fakes (rule 3).
+- BuzzHeavier was verified live on 2026-11-20 against a SteamRIP file (bzzhr.to/ijvxifbx5sgh): the fast path and the Camoufox fallback both resolve it, and a run through the page checked it, downloaded at ~2.2 MB/s over 8 connections, and resumed after a pause and after a server restart. That test download was removed before it finished.
 - Transfer tracking must never sit on the copy path: `/dl` relies on sendfile, so progress is read from the file offset, not by wrapping the writer.
 - Unknown about the box: whether it's NixOS. If it is, the Camoufox fallback needs `programs.nix-ld.enable = true`.
 - Ideas that weren't asked for: a gs FitFast pane (the owner chose the page instead), and auth for any internet exposure (the owner said LAN only "for now").

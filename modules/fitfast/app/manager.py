@@ -30,6 +30,7 @@ from .downloader import Aria2NotFound, Aria2RpcError, Downloader
 from .extractor import extract_all, find_unrar
 from .log import get_logger, log_exception
 from .resolve_proc import SubprocessResolver
+from .hosts import host_for
 from .resolver import common_folder_name, filename_from_fragment, sanitize_filename
 from .scrape_proc import SubprocessScraper
 from .scraper import ScrapeError, fast_scrape, game_title_from_links
@@ -50,6 +51,12 @@ MAX_GAMES = 200
 # extracting. done. failed: parts gave up or the page couldn't be read.
 ACTIVE_STATES = ("queued", "scraping", "downloading", "extracting")
 BUSY_STATES = ("scraping", "downloading", "paused", "extracting")
+
+
+def _split(source: str) -> bool:
+    """Whether this link downloads over several connections (see state.py)."""
+    host = host_for(source)
+    return host is not None and host.connections > 1
 
 
 class Part:
@@ -209,10 +216,19 @@ class Manager:
 
     # ── public API (called from HTTP threads) ─────────────────────────────────
     def add(self, page: str | None, links: list[str], extract: bool = True,
-            delete_archives: bool = False, title: str | None = None) -> Game:
+            delete_archives: bool = False, title: str | None = None,
+            names: dict[str, str] | None = None) -> Game:
+        """Queue a package. ``names`` maps links to filenames a link check
+        found, for hosts whose links don't carry them (FitGirl's do)."""
         g = Game(page, links, extract, delete_archives)
+        for p in g.parts:
+            if names and names.get(p.source):
+                p.filename = sanitize_filename(names[p.source])
         if links:
             g.title = title or game_title_from_links(links)
+            if not g.title:
+                known = [p.filename for p in g.parts if p.filename]
+                g.title = common_folder_name(known) if known else None
         with self.lock:
             done = [x for x in self.games if x.state in ("done", "failed")]
             while len(self.games) >= MAX_GAMES and done:
@@ -460,7 +476,7 @@ class Manager:
                         p.state = "queued"
                     else:
                         continue
-                st.adopt_if_finished(p.source)
+                st.adopt_if_finished(p.source, split=_split(p.source))
                 p.filename = st.known_filename(p.source) or p.filename
                 if st.is_complete(p.source):
                     entry = st.get(p.source) or {}
@@ -524,10 +540,13 @@ class Manager:
             finally:
                 self.resolver = None
             st = self.states.get(gid)
+            host = host_for(p.source)
+            split = _split(p.source)
             if st is not None:
-                if st.heal_fragmented_partial(p.source) is not None:
+                # Holes are how a split download looks mid-way, not damage.
+                if not split and st.heal_fragmented_partial(p.source) is not None:
                     self.log.info("fitfast: healed fragmented partial %s", filename)
-                if st.clear_ghost_file(p.source):
+                if st.clear_ghost_file(p.source, split=split):
                     self.log.info("fitfast: discarded unverifiable partial %s", filename)
                 st.record_resolved(p.source, filename)
             d = self.downloader
@@ -537,7 +556,9 @@ class Manager:
                 p.filename = filename
                 folder = str(self.games_dir / g.folder)
             try:
-                gid_ = d.add(signed, folder, filename)
+                gid_ = d.add(signed, folder, filename,
+                             connections=host.connections if host else 1,
+                             referer=host.referer if host else "")
             except Exception as e:
                 with self.lock:
                     self._mark_failed(p, f"aria2 error: {e}")

@@ -26,10 +26,12 @@ class FakeDownloader:
     def unpause(self, gid): pass
     def remove(self, gid): self.added.pop(gid, None)
 
-    def add(self, url, out_dir, filename):
+    def add(self, url, out_dir, filename, connections=1, referer=""):
         gid = f"g{len(self.added)}"
         Path(out_dir, filename).write_bytes(b"x" * 10)
         self.added[gid] = filename
+        self.connections = getattr(self, "connections", {})
+        self.connections[filename] = connections
         return gid
 
     def status(self, gid):
@@ -135,6 +137,21 @@ class ManagerTest(unittest.TestCase):
         self.assertTrue(m.remove(g.id))
         self.assertIsNone(m.get(g.id))
         m.shutdown()
+
+    def test_connections_per_host(self):
+        """BuzzHeavier files download over several connections; FuckingFast's
+        over one, and only those get the fragmented-partial healing."""
+        links = [LINKS[0], "https://bzzhr.to/aaaaaaaaaa01#Other.part1.rar"]
+        with mock.patch.object(M.DownloadState, "heal_fragmented_partial", autospec=True,
+                               return_value=None) as heal:
+            m = M.Manager(self.root)
+            m.start()
+            g = m.add(None, links, extract=False)
+            self.assertTrue(wait(lambda: m.get(g.id).state == "done"), m.snapshot())
+            m.shutdown()
+        d = FakeDownloader.instances[-1]
+        self.assertEqual(d.connections, {LINKS[0].split("#")[1]: 1, "Other.part1.rar": 8})
+        self.assertEqual([c.args[1] for c in heal.call_args_list], [LINKS[0]])
 
 
 if __name__ == "__main__":

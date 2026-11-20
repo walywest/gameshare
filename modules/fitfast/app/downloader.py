@@ -94,7 +94,8 @@ class Downloader:
             # One connection per file: this CDN returns a to-EOF Content-Range
             # for bounded segment requests, which aria2 rejects as an invalid
             # range. Open-ended single-connection requests are honored. See the
-            # module docstring. connections_per_file is intentionally ignored.
+            # module docstring. connections_per_file is intentionally ignored;
+            # hosts that do handle bounded ranges raise it per file in add().
             "--max-connection-per-server=1",
             "--split=1",
             "--min-split-size=1M",
@@ -176,11 +177,20 @@ class Downloader:
             raise Aria2RpcError(data["error"])
         return data["result"]
 
-    def add(self, url: str, out_dir: str, filename: str) -> str:
+    def add(self, url: str, out_dir: str, filename: str, connections: int = 1,
+            referer: str = "") -> str:
+        """Queue one file. ``connections`` > 1 only for hosts that answer
+        bounded Range requests correctly (hosts.Host.connections); the daemon
+        default stays at one, for fuckingfast (see the module docstring)."""
         opts = {
             "dir": str(out_dir),
             "out": filename,
         }
+        if connections > 1:
+            opts.update({"split": str(connections), "max-connection-per-server": str(connections),
+                         "min-split-size": "8M"})
+        if referer:
+            opts["referer"] = referer
         return self._rpc("aria2.addUri", [url], opts)
 
     def set_overall_limit(self, mbps: float) -> None:

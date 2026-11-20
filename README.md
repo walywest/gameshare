@@ -91,7 +91,11 @@ The server serves a page at `http://<server>:8080/` that brings everything toget
   - **Delete extracted files** (`POST /api/extracted/delete?path=`): removes them and keeps the download, so the archives can be extracted again. It only takes a folder with `.rar` volumes directly in it, because without them nothing tells extracted files from the game. After it, the archives no longer show as extracted, so deleting them warns you.
 - **Services**: what's running, its health, PID, uptime and restarts, its log, and a **Restart** button.
 - **Pull & reconcile**: the same update as `U` in gs (see CD mode), with what changed.
-- **FitFast downloads**: paste a `fitgirl-repacks.site` page or `fuckingfast.co` links and press **Download on server**. The game downloads on the server into `FitFast/<Game>/` in the shared folder, then extracts. Pull it to WSL with gs once it's done. **Get links only** gives you the signed links for another downloader instead. Downloads resume across server restarts.
+- **Downloads**: a download manager in the spirit of JDownloader, run by the FitFast service, that gets past Cloudflare on its own: a Chrome TLS fingerprint first (about a second per link), and the Camoufox stealth browser when that's refused. It takes FitGirl pages and links on FuckingFast and BuzzHeavier (`buzzheavier.com`, `bzzhr.to`). Paste links, or any text with links in it; links on other hosts are left out and named.
+  - **Check links** is the link grabber: each file's name, host, exact size (BuzzHeavier) and whether it's online. Untick what you don't want, name the package (the folder it lands in), and **Start download**. **Copy direct links** hands the signed links to another downloader instead.
+  - **Download now** skips the review. FitGirl links queue at once; others are checked first and then start by themselves.
+  - Packages download on the server into `FitFast/<package>/` in the share, one at a time with their files in parallel, then extract. Pull them to WSL with gs, or download them from Files. They resume across pauses and server restarts.
+  - BuzzHeavier caps each connection at about 350 KB/s, so its files download over 8 connections (about 2 MB/s measured). FuckingFast files use one, which is all its CDN handles.
 
 ### Declaring services
 
