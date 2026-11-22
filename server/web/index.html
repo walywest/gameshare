@@ -343,6 +343,7 @@ async function loadFitFast() {
       ${g.error ? `<div class="facts s-bad">${esc(g.error)}</div>` : ""}
       ${parts ? `<details data-parts="${g.id}" ${openParts.has(g.id) ? "open" : ""}><summary>Parts</summary><div class="parts"><table>${
         g.parts.map(p => `<tr><td>${esc(p.filename)}${p.error && p.state !== "done" ? `<div class="s-bad">${esc(p.error)}</div>` : ""}</td>
+          <td class="num">${esc(p.host || "")}${p.fallback ? ` <span class="s-warn">(fallback)</span>` : ""}</td>
           <td class="num">${esc(p.state)}</td>
           <td class="num">${p.total ? (p.state === "done" ? bytes(p.total) : `${(100 * p.completed / p.total).toFixed(0)}%`) : ""}</td>
           <td class="num">${p.speed ? bytes(p.speed) + "/s" : ""}</td></tr>`).join("")}</table></div></details>` : ""}
@@ -461,7 +462,7 @@ function renderGrab() {
     ${j.items.map((it, i) => { const [st, cls] = itemState(it); return `<tr>
       <td><input type="checkbox" data-pick="${i}" ${g.unpicked.has(it.source) ? "" : "checked"} ${g.auto ? "disabled" : ""}></td>
       <td class="name">${esc(it.filename || it.source)}${it.status === "error" && it.error ? `<div class="facts s-bad">${esc(it.error)}</div>` : ""}</td>
-      <td class="opt">${esc(it.host)}</td>
+      <td class="opt">${esc(it.host)}${it.mirrors && it.mirrors.length ? `<div class="facts">fallback: ${esc(it.mirrors.join(", "))}</div>` : ""}</td>
       <td class="num">${it.size ? bytes(it.size) : "—"}</td>
       <td class="num"><span class="${cls}">${st}</span></td></tr>`; }).join("")}</table>`
     : `<div class="empty" style="margin-top:8px">${j.phase === "scraping" ? "Reading the FitGirl page…" : "No links yet."}</div>`;

@@ -50,6 +50,8 @@ class HostMatching(unittest.TestCase):
             "https://bzzhr.to/help": None,                    # a site page, not a file
             "https://bzzhr.to/ijvxifbx5sgh/download?t=1": None,
             "https://gofile.io/d/abc": None,
+            "https://datanodes.to/xvlmiva4n5bf/Game_--_fitgirl-repacks.site_--_.part1.rar": "datanodes",
+            "https://datanodes.to/xvlmiva4n5bf": "datanodes",
         }
         for url, want in cases.items():
             h = H.host_for(url)
@@ -98,6 +100,70 @@ class BuzzHeavier(unittest.TestCase):
             self.assertEqual(H.probe("https://x/y"), (None, None))
 
 
+class DataNodes(unittest.TestCase):
+    URL = "https://datanodes.to/xvlmiva4n5bf/Game_--_fitgirl-repacks.site_--_.part1.rar"
+
+    def test_needs_the_browser(self):
+        with self.assertRaises(ResolveError) as cm:
+            H.DataNodes().fast_resolve(self.URL)
+        self.assertNotIsInstance(cm.exception, DeadLinkError)   # so the browser gets a go
+
+    def test_filename_from_path(self):
+        self.assertEqual(H.DataNodes().filename(self.URL, "Download Game part1"),
+                         "Game_--_fitgirl-repacks.site_--_.part1.rar")
+
+
+FITGIRL_PAGE = """<h1 class="entry-title">Some Game &#8211; v1.2</h1>
+<a href="https://fuckingfast.co/ff02#Some_Game_--_fitgirl-repacks.site_--_.part2.rar">p2</a>
+<a href="https://fuckingfast.co/ff01#Some_Game_--_fitgirl-repacks.site_--_.part1.rar">p1</a>
+<a href="https://datanodes.to/dn0000000001/Some_Game_--_fitgirl-repacks.site_--_.part1.rar">p1</a>
+<a href="https://datanodes.to/dn0000000002/Some_Game_--_fitgirl-repacks.site_--_.part2.rar">p2</a>
+<a href="https://datanodes.to/dn0000000003/Some_Game_--_fitgirl-repacks.site_--_.part3.rar">only here</a>"""
+
+
+class Mirrors(unittest.TestCase):
+    def test_fitgirl_page(self):
+        from app import scraper as S
+        page = Resp(200, text=FITGIRL_PAGE)
+        with mock.patch("app.resolver.http_session", return_value=mock.Mock(get=mock.Mock(return_value=page))):
+            r = S.fast_scrape("https://fitgirl-repacks.site/some-game/")
+        self.assertEqual([S.link_name(l) for l in r.links],
+                         [f"Some_Game_--_fitgirl-repacks.site_--_.part{i}.rar" for i in (1, 2, 3)])
+        self.assertTrue(r.links[0].startswith("https://fuckingfast.co/ff01"))       # FuckingFast first
+        self.assertEqual(r.mirrors[r.links[0]], ["https://datanodes.to/dn0000000001/Some_Game_--_fitgirl-repacks.site_--_.part1.rar"])
+        self.assertTrue(r.links[2].startswith("https://datanodes.to/"))             # only on DataNodes
+        self.assertNotIn(r.links[2], r.mirrors)
+
+    def test_pasted_lists_pair_up(self):
+        from app import scraper as S
+        ff = "https://fuckingfast.co/ff01#G.part1.rar"
+        dn = "https://datanodes.to/dn0000000001/G.part1.rar"
+        bz = "https://bzzhr.to/aaaaaaaaaa01"
+        self.assertEqual(S.pair_mirrors([dn, bz, ff]), ([ff, bz], {ff: [dn]}))
+
+
+class LinkCheckFallback(unittest.TestCase):
+    def test_dead_fuckingfast_uses_datanodes(self):
+        ff = "https://fuckingfast.co/ff01#G.part1.rar"
+        dn = "https://datanodes.to/dn0000000001/G.part1.rar"
+        job = W.Job(ff)
+        item = W.Item(ff, [dn])
+        job.items, job._pending, job.phase = [item], 1, "resolving"
+
+        def fast(u):
+            if u == ff:
+                raise DeadLinkError("file not found on fuckingfast.co")
+            raise ResolveError("DataNodes takes the browser")
+
+        with mock.patch.object(W, "fast_resolve", side_effect=fast), \
+                mock.patch.object(W, "_browser_resolve", return_value=("https://tunnel/x", "G.part1.rar")), \
+                mock.patch.object(W, "probe", return_value=(2097152000, None)):
+            W._resolve_item(job, item)
+        d = job.as_dict()["items"][0]
+        self.assertEqual((d["status"], d["host"], d["url"], d["size"]), ("done", "DataNodes", "https://tunnel/x", 2097152000))
+        self.assertEqual(d["mirrors"], ["DataNodes"])
+
+
 class ParseInput(unittest.TestCase):
     def test_free_text(self):
         text = ("Mirrors (pick one): https://bzzhr.to/ijvxifbx5sgh, https://gofile.io/d/abc and\n"
@@ -128,8 +194,8 @@ class CheckThenQueue(unittest.TestCase):
         added = {}
 
         class FakeManager:
-            def add(self, page, links, extract, delete, title, names=None):
-                added.update(page=page, links=links, title=title, names=names, extract=extract)
+            def add(self, page, links, extract, delete, title, names=None, mirrors=None):
+                added.update(page=page, links=links, title=title, names=names, extract=extract, mirrors=mirrors)
                 return mock.Mock(id="dl1")
 
         links = ["https://bzzhr.to/aaaaaaaaaa01", "https://bzzhr.to/bbbbbbbbbb02"]

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import html
 import re
+import time
 from urllib.parse import unquote, urljoin, urlsplit
 
 from .resolver import (DeadLinkError, ResolveError, filename_from_fragment,
@@ -250,7 +251,125 @@ class BuzzHeavier(Host):
         return title, challenge
 
 
-HOSTS: tuple[Host, ...] = (FuckingFast(), BuzzHeavier())
+# ── DataNodes (FitGirl's second mirror) ──────────────────────────────────────
+class DataNodes(Host):
+    """Probed live 2026-11-22 on a FitGirl part (datanodes.to/<id>/<filename>):
+
+    1. Step 1 is a form (op=download1) whose Continue button the page enables
+       after a few seconds. A click before that does nothing.
+    2. Step 2 is a Vue widget: a Turnstile check, then "Free download", a
+       5 s wait, and a multipart POST (op=download2, X-Dn-Dl: 1) answered with
+       JSON {"url": "<percent-encoded direct link>"}.
+    3. The server checks the Turnstile token: without one, download2 answers
+       {"error": "The robot check did not go through...", "reload": 1}. So
+       there's no browserless path; Camoufox passes the check by itself.
+    4. The direct link (tunnelN.dlproxy.uk) answers Range requests, bounded
+       ones included, to any client, so aria2 resumes it.
+    A whole resolve takes ~30 s, which is why it's FitGirl's fallback rather
+    than its first choice."""
+
+    name, label = "datanodes", "DataNodes"
+    pattern = re.compile(r"^https?://(?:www\.)?datanodes\.to/([a-z0-9]{10,16})(?:/[^?#\s]*)?", re.IGNORECASE)
+    probe = True
+
+    def fast_resolve(self, url: str) -> tuple[str, str]:
+        raise ResolveError("DataNodes checks a Turnstile token on its last step, so it takes the browser")
+
+    # Everything else is ads and trackers, which slowed the page enough to miss
+    # its own timings. The file host isn't on the list either, so the page's
+    # jump to the file at the end goes nowhere: the link is all we want.
+    _ALLOW = ("datanodes.to", "challenges.cloudflare.com")
+
+    def browser(self, page, url: str, await_challenge) -> tuple[str, str, str]:
+        page.route("**/*", lambda r: r.fallback()
+                   if any(h in r.request.url.split("/", 3)[2] for h in self._ALLOW) else r.abort())
+        resp = page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+        body = ""
+        try:
+            body = page.inner_text("body")[:3000].lower()
+        except Exception:
+            pass
+        if (resp is not None and resp.status == 404) or "file not found" in body or "no longer available" in body:
+            raise DeadLinkError("file not found on DataNodes (removed?)")
+        # Step 1: Continue, once the page has enabled it.
+        cont = page.get_by_role("button", name="Continue")
+        ready = self._button_js("Continue")
+        step2 = "() => !!document.body && /step 2 of 2/i.test(document.body.innerText)"  # null mid-load
+        for attempt in range(3):
+            page.wait_for_function(ready, timeout=60_000)
+            cont.first.click(timeout=30_000)
+            try:
+                page.wait_for_function(step2, timeout=30_000)
+                break
+            except Exception:
+                # Clicked before the page would take it: still on step 1.
+                if attempt == 2 or not page.evaluate(ready):
+                    raise
+        # Step 2: the Turnstile check, which unlocks the button that starts the wait.
+        challenge = self._turnstile(page)
+        if not challenge.startswith("solved"):
+            raise ResolveError(f"DataNodes' Turnstile check didn't pass ({challenge})")
+        page.wait_for_function(self._button_js("Free download"), timeout=30_000)
+        with page.expect_response(
+                lambda r: r.request.method == "POST" and "json" in (r.headers.get("content-type") or ""),
+                timeout=60_000) as info:
+            page.locator("button", has_text="Free download").first.click(timeout=30_000)
+        try:
+            data = info.value.json()
+        except Exception as e:
+            raise ResolveError(f"DataNodes answered something other than JSON: {e}") from e
+        if data.get("url"):
+            return "", challenge, unquote(str(data["url"]))
+        raise ResolveError(f"DataNodes: {data.get('error') or 'no link in its answer'}")
+
+    @staticmethod
+    def _turnstile(page, timeout_s: float = 75.0) -> str:
+        """Wait for the Turnstile token, ticking the box when it asks for that.
+
+        Usually it passes by itself. After many tries from one address it
+        shows "Verify you are human" instead and waits for a click (seen
+        2026-11-22). The widget lives in a closed shadow root, so the click
+        goes to the checkbox's spot in the widget's box; Camoufox moves the
+        mouse there like a person.
+        """
+        token_js = ("() => { const e = document.querySelector('input[name=\"cf-turnstile-response\"]');"
+                    " return e ? e.value : null; }")
+        deadline = time.time() + timeout_s
+        next_click, clicks = time.time() + 6, 0
+        while time.time() < deadline:
+            try:
+                if page.evaluate(token_js):
+                    return "solved" if not clicks else f"solved after {clicks} click(s)"
+            except Exception:
+                pass
+            if time.time() >= next_click and clicks < 3:
+                box = None
+                try:
+                    box = page.locator(".cf-turnstile").first.bounding_box()
+                except Exception:
+                    pass
+                if box and box["width"] > 0:
+                    page.mouse.click(box["x"] + 30, box["y"] + box["height"] / 2)
+                    clicks += 1
+                next_click = time.time() + 12
+            page.wait_for_timeout(500)
+        return "unsolved" + (f" after {clicks} click(s)" if clicks else "")
+
+    @staticmethod
+    def _button_js(label: str) -> str:
+        """JS: is a visible, enabled button starting with this label on the page?"""
+        return ("() => [...document.querySelectorAll('button')].some(b => b.offsetParent && !b.disabled"
+                f" && (b.innerText || '').trim().startsWith('{label}'))")
+
+    def filename(self, url: str, title: str) -> str:
+        # The URL ends with the exact file name, which is also FuckingFast's.
+        tail = unquote(urlsplit(url).path.rstrip("/").split("/", 2)[-1]) if url.count("/") > 3 else ""
+        if tail and "/" not in tail:
+            return sanitize_filename(tail)
+        return super().filename(url, title)
+
+
+HOSTS: tuple[Host, ...] = (FuckingFast(), BuzzHeavier(), DataNodes())
 
 
 def host_for(url: str) -> Host | None:

@@ -48,7 +48,8 @@ from .resolver import (DeadLinkError, ResolveError, common_folder_name, fast_res
                        filename_from_fragment, valid_url)
 from urllib.parse import urlsplit
 from .scrape_proc import SubprocessScraper
-from .scraper import ScrapeError, fast_scrape, game_title_from_links, is_fitgirl_url
+from .scraper import (ScrapeError, fast_scrape, game_title_from_links, is_fitgirl_url,
+                      link_name, pair_mirrors)
 
 STATIC_DIR = Path(__file__).resolve().parent / "web_static"
 MODULE_DIR = Path(__file__).resolve().parent.parent
@@ -83,11 +84,12 @@ _pool = ThreadPoolExecutor(max_workers=FAST_PARALLEL, thread_name_prefix="resolv
 # ── jobs ──────────────────────────────────────────────────────────────────────
 
 class Item:
-    __slots__ = ("source", "filename", "status", "url", "error", "resolved_at", "host", "size")
+    __slots__ = ("source", "filename", "status", "url", "error", "resolved_at", "host", "size", "mirrors")
 
-    def __init__(self, source: str) -> None:
+    def __init__(self, source: str, mirrors: list[str] | None = None) -> None:
         self.source = source
-        self.filename = filename_from_fragment(source) or ""
+        self.mirrors = list(mirrors or [])   # copies on other hosts, tried if it fails
+        self.filename = filename_from_fragment(source) or link_name(source) or ""
         self.status = "queued"         # queued | resolving | done | error | cancelled
         self.url: str | None = None
         self.error: str | None = None
@@ -99,7 +101,8 @@ class Item:
     def as_dict(self) -> dict:
         return {"source": self.source, "filename": self.filename,
                 "status": self.status, "url": self.url, "error": self.error,
-                "resolved_at": self.resolved_at, "host": self.host, "size": self.size}
+                "resolved_at": self.resolved_at, "host": self.host, "size": self.size,
+                "mirrors": [_label(m) for m in self.mirrors]}
 
 
 class Job:
@@ -257,7 +260,12 @@ def _scrape(job: Job, page_url: str) -> list[str] | None:
             job._untrack(scraper)
     with job.lock:
         job.title = result.title
-    return result.links
+    return result
+
+
+def _label(url: str) -> str:
+    h = host_for(url)
+    return h.label if h else urlsplit(url).netloc
 
 
 def _browser_resolve(job: Job, url: str) -> tuple[str, str] | None:
@@ -280,27 +288,35 @@ def _resolve_item(job: Job, item: Item) -> None:
                 return
             item.status = "resolving"
             item.error = None
-        try:
+        # The link itself, then its copies on other hosts.
+        failures, res, link = [], None, item.source
+        for link in [item.source] + item.mirrors:
             try:
-                res = fast_resolve(item.source)
-            except DeadLinkError:
-                raise
-            except ResolveError as e:
-                log.info("web: job %s fast resolve failed (%s); using the browser", job.id, e)
-                res = _browser_resolve(job, item.source)
-        except Exception as e:
-            if job.cancelled:
-                return
+                try:
+                    res = fast_resolve(link)
+                except DeadLinkError:
+                    raise
+                except ResolveError as e:
+                    log.info("web: job %s fast resolve failed (%s); using the browser", job.id, e)
+                    res = _browser_resolve(job, link)
+                    if res is None:
+                        return     # cancelled
+                break
+            except Exception as e:
+                if job.cancelled:
+                    return
+                failures.append(f"{_label(link)}: {str(e)[:200] or 'resolve failed'}")
+                log.warning("web: resolve failed for job %s on %s: %s", job.id, _label(link), e)
+        if res is None:
             with job.lock:
                 if item.status != "cancelled":
                     item.status = "error"
-                    item.error = str(e)[:300] or "resolve failed"
-            log.warning("web: resolve failed for job %s: %s", job.id, e)
-            return
-        if res is None:
+                    item.error = "; ".join(failures)[:400]
             return
         signed, filename = res
-        host = host_for(item.source)
+        if link != item.source and item.filename:
+            filename = item.filename   # the same file, under the name it has everywhere
+        host = host_for(link)
         size = served_name = None
         if host is not None and host.probe:
             size, served_name = probe(signed)
@@ -310,6 +326,7 @@ def _resolve_item(job: Job, item: Item) -> None:
             item.url = signed
             item.filename = filename or served_name or item.filename
             item.size = size
+            item.host = _label(link)
             item.status = "done"
             item.resolved_at = time.time()
     finally:
@@ -347,7 +364,8 @@ def _autostart(job: Job) -> None:
     try:
         game = MANAGER.add(None, [it.source for it in items], bool(opts.get("extract", True)),
                            bool(opts.get("delete_archives", False)), title,
-                           names={it.source: it.filename for it in items})
+                           names={it.source: it.filename for it in items},
+                           mirrors={it.source: it.mirrors for it in items if it.mirrors})
     except ValueError as e:
         with job.lock:
             job.error = str(e)
@@ -376,14 +394,16 @@ def run_job(job: Job) -> None:
             with job.lock:
                 job.phase = "scraping"
             log.info("web: job %s scraping a FitGirl page", job.id)
-            links = _scrape(job, page_url)
-            if links is None:
+            result = _scrape(job, page_url)
+            if result is None:
                 return
-            links = links[:MAX_LINKS]
+            links, mirrors = result.links[:MAX_LINKS], result.mirrors
+        else:
+            links, mirrors = pair_mirrors(links)   # both of FitGirl's lists pasted: one per file
         if job.cancelled:
             return
         with job.lock:
-            job.items = [Item(l) for l in links]
+            job.items = [Item(l, mirrors.get(l)) for l in links]
             if not job.title:
                 job.title = game_title_from_links(links)
         log.info("web: job %s resolving %d links", job.id, len(links))
@@ -617,7 +637,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/downloads":
             extract = _flag(data, "extract", True)
             delete = _flag(data, "delete_archives", False)
-            title, names = None, None
+            title, names, mirrors = None, None, None
             if data.get("job"):
                 job = JOBS.get(str(data["job"]))
                 if job is None:
@@ -629,6 +649,7 @@ class Handler(BaseHTTPRequestHandler):
                     items = [it for it in job.items if wanted is None or it.source in wanted]
                     page, links = None, [it.source for it in items]
                     names = {it.source: it.filename for it in items if it.filename}
+                    mirrors = {it.source: it.mirrors for it in items if it.mirrors}
                     title = str(data.get("title") or "").strip()[:200] or job.title
                 if not links:
                     return self._json(HTTPStatus.BAD_REQUEST, {"error": "no links picked"})
@@ -638,7 +659,9 @@ class Handler(BaseHTTPRequestHandler):
                     page, links, _ = parse_input(text)
                 except InputError as e:
                     return self._json(HTTPStatus.BAD_REQUEST, {"error": str(e)})
-                if not page and any(not filename_from_fragment(l) for l in links):
+                if not page:
+                    links, mirrors = pair_mirrors(links)
+                if not page and any(not link_name(l) for l in links):
                     # Names that only come from resolving (anything but FitGirl's
                     # links): check them first, then queue. The package is named
                     # from them, which is the folder it lands in.
@@ -650,7 +673,7 @@ class Handler(BaseHTTPRequestHandler):
                         return self._json(HTTPStatus.TOO_MANY_REQUESTS, {"error": str(e)})
                     return self._json(HTTPStatus.ACCEPTED, {"job": job.id})
             try:
-                game = MANAGER.add(page, links, extract, delete, title, names=names)
+                game = MANAGER.add(page, links, extract, delete, title, names=names, mirrors=mirrors)
             except ValueError as e:
                 return self._json(HTTPStatus.TOO_MANY_REQUESTS, {"error": str(e)})
             get_logger().info("web: download %s queued by %s", game.id, self.client_address[0])

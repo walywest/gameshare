@@ -261,7 +261,12 @@ class Resolver:
         page.on("response", on_response)
 
         try:
-            title, challenge = host.browser(page, url, self._await_challenge)
+            # Hosts that hand the URL out some other way than an hx-redirect
+            # header return it as a third value.
+            res = host.browser(page, url, self._await_challenge)
+            title, challenge = res[0], res[1]
+            if len(res) > 2 and res[2]:
+                captured["signed_url"] = res[2]
 
             deadline = time.time() + 20
             while captured["signed_url"] is None and time.time() < deadline:
@@ -270,7 +275,7 @@ class Resolver:
             if not captured["signed_url"]:
                 detail = "; ".join(trace) if trace else "no candidate responses at all"
                 raise ResolveError(
-                    "no hx-redirect header on any response after 20s "
+                    "no download link on any response after 20s "
                     f"(challenge: {challenge}; saw: {detail})")
 
             return captured["signed_url"], host.filename(url, title)

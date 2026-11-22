@@ -1,18 +1,23 @@
-"""Scrape a fitgirl-repacks.site game page for its FuckingFast part links.
+"""Scrape a fitgirl-repacks.site game page for its part links.
 
 FitGirl posts list the FuckingFast mirror as inline anchors in the exact form
     https://fuckingfast.co/<id>#<Game>_--_fitgirl-repacks.site_--_.partNN.rar
-so scraping is just: load the page past Cloudflare, grab every fuckingfast.co
-anchor, natural-sort by part number, dedupe.
+and the DataNodes mirror as
+    https://datanodes.to/<id>/<Game>_--_fitgirl-repacks.site_--_.partNN.rar
+so scraping is just: load the page past Cloudflare, grab both kinds of anchor,
+natural-sort by part number, dedupe, and pair each FuckingFast part with the
+DataNodes copy of the same file (pair_mirrors), which is its fallback.
 """
 from __future__ import annotations
 import html
 import re
+from urllib.parse import unquote
 
 from camoufox.sync_api import Camoufox
 
 FITGIRL_HOST_RE = re.compile(r"^https?://(www\.)?fitgirl-repacks\.site/", re.IGNORECASE)
 FF_HREF_RE = re.compile(r"https?://fuckingfast\.co/[A-Za-z0-9]+", re.IGNORECASE)
+DN_HREF_RE = re.compile(r"https?://(?:www\.)?datanodes\.to/[A-Za-z0-9]+/[^\s\"'<>#?]+", re.IGNORECASE)
 _PART_RE = re.compile(r"\.part(\d+)\.", re.IGNORECASE)
 _INVALID_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
@@ -22,26 +27,72 @@ class ScrapeError(Exception):
 
 
 class ScrapeResult:
-    """Links plus the game title parsed from the page (used for the subfolder)."""
-    __slots__ = ("links", "title")
+    """Links plus the game title parsed from the page (used for the subfolder),
+    and each link's fallback copies on other hosts (link -> [mirror, ...])."""
+    __slots__ = ("links", "title", "mirrors")
 
-    def __init__(self, links: list[str], title: str | None):
+    def __init__(self, links: list[str], title: str | None, mirrors: dict[str, list[str]] | None = None):
         self.links = links
         self.title = title
+        self.mirrors = mirrors or {}
 
 
 def is_fitgirl_url(url: str) -> bool:
     return bool(FITGIRL_HOST_RE.match(url.strip()))
 
 
+def link_name(url: str) -> str:
+    """The file name a link carries without a request: FuckingFast's fragment,
+    DataNodes' last path segment. Empty when it carries none."""
+    if "#" in url:
+        return url.split("#", 1)[1]
+    if DN_HREF_RE.match(url):
+        return unquote(url.split("?", 1)[0].rstrip("/").rsplit("/", 1)[1])
+    return ""
+
+
+# Which copy of a file to try first: FuckingFast resolves in ~0.3s without a
+# browser, DataNodes takes a browser and ~30s.
+_PREFERENCE = ("fuckingfast.co", "datanodes.to")
+
+
+def pair_mirrors(links: list[str]) -> tuple[list[str], dict[str, list[str]]]:
+    """Group links to the same file on different hosts, by file name.
+
+    Returns (one link per file, in order; {that link: [its other copies]}).
+    The first copy is the preferred host's. Links that carry no name stand
+    alone.
+    """
+    groups: dict[str, list[str]] = {}
+    order: list[str] = []
+    for u in links:
+        key = link_name(u).lower() or u
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(u)
+
+    def rank(u: str) -> int:
+        host = u.split("/", 3)[2].lower().removeprefix("www.") if u.count("/") >= 2 else ""
+        return _PREFERENCE.index(host) if host in _PREFERENCE else len(_PREFERENCE)
+
+    primaries, mirrors = [], {}
+    for key in order:
+        copies = sorted(groups[key], key=rank)
+        primaries.append(copies[0])
+        if len(copies) > 1:
+            mirrors[copies[0]] = copies[1:]
+    return primaries, mirrors
+
+
 def _base_and_part(url: str) -> tuple[str, int]:
-    """Split a link's filename fragment into (base_set_name, part_number).
+    """Split a link's file name into (base_set_name, part_number).
 
     A repack can contain several archive sets (main game + bonus content);
     grouping by base name keeps each set contiguous instead of interleaving
     them by part number.
     """
-    frag = url.split("#", 1)[1] if "#" in url else url
+    frag = link_name(url) or url
     m = _PART_RE.search(frag)
     part = int(m.group(1)) if m else 0
     base = frag[: m.start()] if m else frag
@@ -58,13 +109,13 @@ def _clean_title(raw: str) -> str | None:
 
 
 def _collect_links(page, links: list[str], seen: set[str]) -> None:
-    """Append any new FuckingFast anchors on ``page`` into ``links`` (deduped)."""
+    """Append any new FuckingFast and DataNodes anchors on ``page`` into ``links`` (deduped)."""
     hrefs = page.eval_on_selector_all(
-        "a[href*='fuckingfast']",
+        "a[href*='fuckingfast'], a[href*='datanodes']",
         "els => els.map(e => e.href)",
     )
     for h in hrefs:
-        m = FF_HREF_RE.match(h)
+        m = FF_HREF_RE.match(h) or DN_HREF_RE.match(h)
         if not m:
             continue
         clean = h if "#" in h else m.group(0)
@@ -127,8 +178,11 @@ def _scrape_once(page_url: str, timeout_ms: int) -> tuple[list[str], str | None]
     return links, title
 
 
-_ANCHOR_RE = re.compile(r"""href\s*=\s*["'](https?://fuckingfast\.co/[^"'\s>]+)["']""",
-                        re.IGNORECASE)
+_ANCHOR_RE = re.compile(
+    r"""href\s*=\s*["'](https?://(?:fuckingfast\.co|(?:www\.)?datanodes\.to)/[^"'\s>]+)["']""",
+    re.IGNORECASE)
+_NO_LINKS = ("No FuckingFast or DataNodes links found on that page. Make sure it's a game "
+             "repack page (not the homepage or an 'upcoming' post).")
 _H1_RE = re.compile(r'<h1[^>]*class="[^"]*entry-title[^"]*"[^>]*>(.*?)</h1>',
                     re.IGNORECASE | re.DOTALL)
 _TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
@@ -160,7 +214,7 @@ def fast_scrape(page_url: str, timeout: float = 30.0) -> ScrapeResult:
     seen: set[str] = set()
     for raw in _ANCHOR_RE.findall(text):
         h = html.unescape(raw)
-        m = FF_HREF_RE.match(h)
+        m = FF_HREF_RE.match(h) or DN_HREF_RE.match(h)
         if not m:
             continue
         key = m.group(0)
@@ -169,10 +223,9 @@ def fast_scrape(page_url: str, timeout: float = 30.0) -> ScrapeResult:
         seen.add(key)
         links.append(h if "#" in h else key)
     if not links:
-        raise ScrapeError(
-            "No FuckingFast links found on that page. Make sure it's a game "
-            "repack page (not the homepage or an 'upcoming' post).")
+        raise ScrapeError(_NO_LINKS)
     links.sort(key=_base_and_part)
+    links, mirrors = pair_mirrors(links)
     title = None
     for rx in (_H1_RE, _TITLE_RE):
         mt = rx.search(text)
@@ -180,7 +233,7 @@ def fast_scrape(page_url: str, timeout: float = 30.0) -> ScrapeResult:
             title = _clean_title(_html_text(mt.group(1)))
             if title:
                 break
-    return ScrapeResult(links, title)
+    return ScrapeResult(links, title, mirrors)
 
 
 def scrape_fitgirl_page(page_url: str, timeout_ms: int = 60_000,
@@ -210,13 +263,11 @@ def scrape_fitgirl_page(page_url: str, timeout_ms: int = 60_000,
     if not links:
         if last_err is not None:
             raise ScrapeError(f"Failed to load page: {last_err}") from last_err
-        raise ScrapeError(
-            "No FuckingFast links found on that page. Make sure it's a game "
-            "repack page (not the homepage or an 'upcoming' post)."
-        )
+        raise ScrapeError(_NO_LINKS)
 
     links.sort(key=_base_and_part)
-    return ScrapeResult(links, title)
+    links, mirrors = pair_mirrors(links)
+    return ScrapeResult(links, title, mirrors)
 
 
 def game_title_from_links(links: list[str]) -> str | None:

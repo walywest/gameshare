@@ -120,7 +120,7 @@ class SubprocessScraper:
             except ValueError:
                 continue
             if isinstance(data.get("links"), list):
-                return ScrapeResult(data["links"], data.get("title") or None)
+                return ScrapeResult(data["links"], data.get("title") or None, data.get("mirrors") or {})
         raise ScrapeError("worker produced no result")
 
 
@@ -142,7 +142,7 @@ def _worker_main(argv: list[str]) -> int:
         print(str(e), file=sys.stderr)
         return 1
     # A bare marker line keeps us immune to whatever the browser prints.
-    print(json.dumps({"links": result.links, "title": result.title}), flush=True)
+    print(json.dumps({"links": result.links, "title": result.title, "mirrors": result.mirrors}), flush=True)
     return 0
 
 

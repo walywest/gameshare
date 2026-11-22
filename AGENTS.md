@@ -19,7 +19,8 @@ server/            Go server (port 8080): file API, CD updates, service supervis
 client/            gs: Bubble Tea TUI for transfers (runs in WSL). Its only homelab link is `U` (update)
 modules/fitfast/   FitFast downloader (Python), imported with git subtree (history kept)
   app/manager.py   headless server-side download engine (queue, aria2, retries, extract)
-  app/hosts.py     one plugin per file host (FuckingFast, BuzzHeavier): fast resolve, browser steps
+  app/hosts.py     one plugin per file host (FuckingFast, BuzzHeavier, DataNodes): fast resolve, browser steps
+  app/scraper.py   FitGirl pages: FuckingFast and DataNodes links, paired by file name (pair_mirrors)
   app/resolver.py  shared: errors, curl_cffi session, filename helpers, the Camoufox driver
   app/web.py       HTTP API: /api/status, /api/downloads*, /api/jobs* (link grabber / check)
   app/tui.py       LEGACY Textual UI. Kept for reference; nothing runs it. Don't extend it
@@ -123,6 +124,7 @@ That's how the first homelab rollout was verified (2026-11-10).
 
 - The box runs the homelab from `main`. Deploys so far were `git push origin main`, then `POST /api/update` (same as `U` in gs); each came back on its own with FitFast healthy.
 - A real FitGirl download (HITMAN WoA, 120 parts) has gone through the page end to end, including extraction. Tests still use only the fakes (rule 3).
+- **Mirrors:** a part has `mirrors` (other hosts' copies of the same file) and `via` (the one in use). `Part.url()` is what gets resolved; `Part.source` stays the key for `state.py`, and the filename stays the same, so a switch resumes the same file. `_mark_failed` switches at once on a `DeadLinkError`, else after `MIRROR_AFTER` (3) attempts without progress; Retry resets `via`. DataNodes has no browserless path (the server checks a Turnstile token); its plugin passes the check in Camoufox and ticks the box when Turnstile asks for it. Probed and resolved live 2026-11-22 on a FitGirl part; each resolve is ~25 s.
 - BuzzHeavier was verified live on 2026-11-20 against a SteamRIP file (bzzhr.to/ijvxifbx5sgh): the fast path and the Camoufox fallback both resolve it, and a run through the page checked it, downloaded at ~2.2 MB/s over 8 connections, and resumed after a pause and after a server restart. That test download was removed before it finished.
 - Transfer tracking must never sit on the copy path: `/dl` relies on sendfile, so progress is read from the file offset, not by wrapping the writer.
 - Unknown about the box: whether it's NixOS. If it is, the Camoufox fallback needs `programs.nix-ld.enable = true`.

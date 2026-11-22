@@ -7,6 +7,8 @@ from pathlib import Path
 from unittest import mock
 
 from app import manager as M
+from app.resolver import DeadLinkError
+from app.scraper import link_name
 
 LINKS = [f"https://fuckingfast.co/abc{i}#Game_Name--fitgirl-repacks.site--.part0{i}.rar" for i in (1, 2)]
 
@@ -42,10 +44,15 @@ class FakeDownloader:
 
 class FakeResolver:
     calls = 0
+    dead: set = set()     # links that answer as removed
+    tried: list = []
 
     def resolve(self, url):
         FakeResolver.calls += 1
-        return "https://dl.example/" + url[-8:], url.split("#", 1)[1]
+        FakeResolver.tried.append(url)
+        if url in FakeResolver.dead:
+            raise DeadLinkError("file not found")
+        return "https://dl.example/" + url[-8:], link_name(url)
 
     def close(self): pass
 
@@ -67,6 +74,7 @@ class ManagerTest(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp())
         FakeResolver.calls = 0
+        FakeResolver.dead, FakeResolver.tried = set(), []
 
     def test_download_persist_and_resume(self):
         m = M.Manager(self.root)
@@ -152,6 +160,35 @@ class ManagerTest(unittest.TestCase):
         d = FakeDownloader.instances[-1]
         self.assertEqual(d.connections, {LINKS[0].split("#")[1]: 1, "Other.part1.rar": 8})
         self.assertEqual([c.args[1] for c in heal.call_args_list], [LINKS[0]])
+
+    def test_dead_link_falls_back_to_mirror(self):
+        """A part whose FuckingFast file is gone finishes from its DataNodes
+        copy, under the same name; Retry puts FuckingFast first again."""
+        ff = LINKS[0]
+        dn = "https://datanodes.to/aaaaaaaaaa01/" + ff.split("#")[1]
+        FakeResolver.dead = {ff}
+        m = M.Manager(self.root)
+        m.start()
+        g = m.add(None, [ff, LINKS[1]], extract=False, mirrors={ff: [dn]})
+        self.assertTrue(wait(lambda: m.get(g.id).state == "done"), m.snapshot())
+        p = m.get(g.id).parts[0]
+        self.assertEqual((p.via, p.url(), p.state), (1, dn, "done"))
+        self.assertEqual(FakeResolver.tried.count(ff), 1)        # dead: no retries on it
+        view = m.snapshot()["games"][0]["parts"][0]
+        self.assertEqual((view["host"], view["fallback"]), ("DataNodes", True))
+        self.assertIn(ff.split("#")[1], FakeDownloader.instances[-1].added.values())
+        m.shutdown()
+
+        # The mirror survives a restart, and Retry starts from FuckingFast again.
+        m = M.Manager(self.root)
+        m.start()               # loads the saved queue
+        p = m.get(g.id).parts[0]
+        self.assertEqual((p.mirrors, p.via), ([dn], 1))
+        with m.lock:
+            p.state = "failed"
+            m.retry(g.id)
+            self.assertEqual(p.via, 0)
+        m.shutdown()
 
 
 if __name__ == "__main__":

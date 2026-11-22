@@ -31,9 +31,9 @@ from .extractor import extract_all, find_unrar
 from .log import get_logger, log_exception
 from .resolve_proc import SubprocessResolver
 from .hosts import host_for
-from .resolver import common_folder_name, filename_from_fragment, sanitize_filename
+from .resolver import DeadLinkError, common_folder_name, filename_from_fragment, sanitize_filename
 from .scrape_proc import SubprocessScraper
-from .scraper import ScrapeError, fast_scrape, game_title_from_links
+from .scraper import ScrapeError, fast_scrape, game_title_from_links, link_name
 from .state import DownloadState
 
 GAMES_DIR = "FitFast"            # under the served root, so gs can pull finished games
@@ -42,6 +42,7 @@ STATE_DIR = ".fitfast"           # dot folder: hidden from gs and refused by the
 RETRY_BASE_DELAY_S = 5.0
 RETRY_MAX_DELAY_S = 60.0
 MAX_FAILS_WITHOUT_PROGRESS = 8
+MIRROR_AFTER = 3             # attempts without progress before trying a part's next mirror
 CHECKPOINT_EVERY_S = 10.0
 TICK_S = 1.0
 MAX_GAMES = 200
@@ -53,6 +54,11 @@ ACTIVE_STATES = ("queued", "scraping", "downloading", "extracting")
 BUSY_STATES = ("scraping", "downloading", "paused", "extracting")
 
 
+def _label(url: str) -> str:
+    host = host_for(url)
+    return host.label if host else "the link"
+
+
 def _split(source: str) -> bool:
     """Whether this link downloads over several connections (see state.py)."""
     host = host_for(source)
@@ -60,9 +66,16 @@ def _split(source: str) -> bool:
 
 
 class Part:
-    def __init__(self, source: str, filename: str = "") -> None:
+    """One file. ``source`` is its link and the key for its on-disk state;
+    ``mirrors`` are copies of the same file on other hosts, tried in order
+    when the link is dead or keeps failing. ``via`` is the one in use."""
+
+    def __init__(self, source: str, filename: str = "", mirrors: list[str] | None = None) -> None:
         self.source = source
-        self.filename = filename or filename_from_fragment(source) or ""
+        self.mirrors = list(mirrors or [])
+        self.via = 0
+        named = link_name(source)   # DataNodes links carry the name in their path
+        self.filename = filename or filename_from_fragment(source) or (sanitize_filename(named) if named else "")
         self.state = "queued"           # queued|resolving|downloading|done|error|failed
         self.gid: str | None = None
         self.error: str | None = None
@@ -74,14 +87,20 @@ class Part:
         self.best_completed = 0
         self.fails_without_progress = 0
 
+    def url(self) -> str:
+        """The link being used: the part's own, or the mirror it fell back to."""
+        return ([self.source] + self.mirrors)[min(self.via, len(self.mirrors))]
+
     def saved(self) -> dict:
         return {"source": self.source, "filename": self.filename,
                 "state": self.state if self.state in ("done", "failed") else "queued",
-                "total": self.total, "completed": self.completed, "error": self.error}
+                "total": self.total, "completed": self.completed, "error": self.error,
+                "mirrors": self.mirrors, "via": self.via}
 
     @classmethod
     def load(cls, d: dict) -> "Part":
-        p = cls(str(d["source"]), str(d.get("filename") or ""))
+        p = cls(str(d["source"]), str(d.get("filename") or ""), [str(m) for m in d.get("mirrors") or []])
+        p.via = int(d.get("via") or 0)
         p.state = d.get("state") if d.get("state") in ("done", "failed") else "queued"
         p.total = int(d.get("total") or 0)
         p.completed = int(d.get("completed") or 0)
@@ -90,9 +109,11 @@ class Part:
         return p
 
     def view(self) -> dict:
+        host = host_for(self.url())
         return {"filename": self.filename, "state": self.state, "total": self.total,
                 "completed": self.completed, "speed": self.speed, "error": self.error,
-                "retries": self.retry_count}
+                "retries": self.retry_count, "host": host.label if host else "",
+                "fallback": self.via > 0, "mirrors": len(self.mirrors)}
 
 
 class Game:
@@ -217,13 +238,17 @@ class Manager:
     # ── public API (called from HTTP threads) ─────────────────────────────────
     def add(self, page: str | None, links: list[str], extract: bool = True,
             delete_archives: bool = False, title: str | None = None,
-            names: dict[str, str] | None = None) -> Game:
+            names: dict[str, str] | None = None,
+            mirrors: dict[str, list[str]] | None = None) -> Game:
         """Queue a package. ``names`` maps links to filenames a link check
-        found, for hosts whose links don't carry them (FitGirl's do)."""
+        found, for hosts whose links don't carry them (FitGirl's do).
+        ``mirrors`` maps links to copies on other hosts, their fallbacks."""
         g = Game(page, links, extract, delete_archives)
         for p in g.parts:
             if names and names.get(p.source):
                 p.filename = sanitize_filename(names[p.source])
+            if mirrors and mirrors.get(p.source):
+                p.mirrors = list(mirrors[p.source])
         if links:
             g.title = title or game_title_from_links(links)
             if not g.title:
@@ -298,6 +323,7 @@ class Manager:
                     p.state, p.error, p.gid = "queued", None, None
                     p.retry_count = p.fails_without_progress = 0
                     p.next_retry_at = 0.0
+                    p.via = 0   # the preferred host first again, then its mirrors
                     n += 1
                     if g.started:
                         self.resolve_q.put((g.id, p))
@@ -432,10 +458,10 @@ class Manager:
         with self.lock:
             if g not in self.games:
                 return
-            g.parts = [Part(u) for u in result.links]
+            g.parts = [Part(u, mirrors=result.mirrors.get(u)) for u in result.links]
             g.title = game_title_from_links(result.links) or result.title or g.title
             if not g.parts:
-                g.state, g.error, g.finished = "failed", "no FuckingFast links on that page", time.time()
+                g.state, g.error, g.finished = "failed", "no FuckingFast or DataNodes links on that page", time.time()
             elif g.state == "scraping":
                 g.state = "queued"
             elif g.state == "paused":
@@ -527,21 +553,24 @@ class Manager:
             if later:
                 threading.Timer(2.0, self.resolve_q.put, args=((gid, p),)).start()
                 continue
+            link = p.url()
             self.resolver = SubprocessResolver()
             try:
-                signed, filename = self.resolver.resolve(p.source)
+                signed, filename = self.resolver.resolve(link)
             except Exception as e:
                 if self.stopping.is_set():
                     return
                 with self.lock:
                     if p.state == "resolving":
-                        self._mark_failed(p, f"resolve error: {e}")
+                        self._mark_failed(p, f"resolve error: {e}", dead=isinstance(e, DeadLinkError))
                 continue
             finally:
                 self.resolver = None
+            if p.via and p.filename:
+                filename = p.filename   # a mirror continues the same file
             st = self.states.get(gid)
-            host = host_for(p.source)
-            split = _split(p.source)
+            host = host_for(link)
+            split = _split(link)
             if st is not None:
                 # Holes are how a split download looks mid-way, not damage.
                 if not split and st.heal_fragmented_partial(p.source) is not None:
@@ -577,9 +606,13 @@ class Manager:
                     except Exception:
                         pass
 
-    def _mark_failed(self, p: Part, error: str) -> None:
+    def _mark_failed(self, p: Part, error: str, dead: bool = False) -> None:
         """Same rules as the TUI: retry forever while a part makes progress,
-        give up after MAX_FAILS_WITHOUT_PROGRESS attempts that don't."""
+        give up after MAX_FAILS_WITHOUT_PROGRESS attempts that don't.
+
+        A part with mirrors moves to the next one first: at once when its link
+        is dead, after MIRROR_AFTER attempts without progress otherwise. The
+        file and its on-disk progress stay the same, so it carries on."""
         p.error = error[:300]
         p.gid = None
         if p.completed > p.best_completed:
@@ -589,6 +622,15 @@ class Manager:
             p.fails_without_progress += 1
         p.retry_count += 1
         self.log.warning("fitfast: part %s failed (attempt %d): %s", p.filename, p.retry_count, error)
+        if (dead or p.fails_without_progress >= MIRROR_AFTER) and p.via < len(p.mirrors):
+            was = _label(p.url())
+            p.via += 1
+            p.fails_without_progress, p.best_completed = 0, p.completed
+            p.error = f"{was} failed ({error[:200]}); trying {_label(p.url())}"
+            p.state, p.next_retry_at = "error", time.time() + 1
+            self.log.warning("fitfast: part %s: %s", p.filename, p.error)
+            self._changed()
+            return
         if p.fails_without_progress >= MAX_FAILS_WITHOUT_PROGRESS:
             p.state = "failed"
         else:
